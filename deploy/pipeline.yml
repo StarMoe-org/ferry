@@ -1,6 +1,8 @@
 # Default CNB build pipeline template.
 # Ferry replaces __BRANCH__ with <branchPrefix><image> before calling /-/build/start.
-# Adjust org/infra.git in the deploy stage to match your infra repository containing hack/bump.sh.
+# Ferry polls the build and deploys the image to the workloads itself when it succeeds (the in-build
+# CNB_TOKEN is only accepted inside CNB, so the pipeline cannot call POST /deploy). The last stage only
+# bumps manifests kept in git (Argo CD tracked); adjust org/infra.git to your repository with hack/bump.sh.
 "__BRANCH__":
   api_trigger_build:
     - name: build
@@ -14,16 +16,16 @@
             TAG=$(echo "$SRC_SHA" | cut -c1-12)
             echo "$CNB_TOKEN" | docker login -u "$CNB_TOKEN_USER_NAME" --password-stdin "$CNB_DOCKER_REGISTRY"
             docker pull -q "$IMG:latest" || true
-            docker build --cache-from "$IMG:latest" --build-arg BUILDKIT_INLINE_CACHE=1 \
+            docker build --cache-from "$IMG:latest" --build-arg BUILDKIT_INLINE_CACHE=1 --build-arg VERSION="$TAG" \
               --label org.opencontainers.image.source="https://github.com/$SRC_REPO" \
               --label org.opencontainers.image.revision="$SRC_SHA" \
               $BUILD_ARGS -t "$IMG:$TAG" -t "$IMG:latest" .
             docker push -q "$IMG:$TAG"
             docker push -q "$IMG:latest"
-        - name: deploy
+        - name: bump manifests
           script: |
             set -eu
             IMG="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}/${IMAGE_NAME}"
             TAG=$(echo "$SRC_SHA" | cut -c1-12)
             git clone -q "https://cnb:${CNB_TOKEN}@cnb.cool/org/infra.git" /tmp/infra
-            cd /tmp/infra && sh hack/bump.sh "$IMG" "$TAG" "https://github.com/$SRC_REPO/commit/$SRC_SHA"
+            cd /tmp/infra && BUMP_GIT_ONLY=1 sh hack/bump.sh "$IMG" "$TAG" "https://github.com/$SRC_REPO/commit/$SRC_SHA"

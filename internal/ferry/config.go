@@ -30,18 +30,18 @@ func ExpandEnv(raw []byte) []byte {
 
 // Config is the top-level YAML configuration for Ferry.
 type Config struct {
-	Listen           string       `json:"listen"`
-	AnnotationPrefix string       `json:"annotationPrefix"`
-	WorkDir          string       `json:"workDir"`
-	Auth             AuthConfig   `json:"auth"`
-	State            StateConfig  `json:"state"`
-	Namespaces       []string     `json:"namespaces"`
-	Clusters         []kube.Config `json:"clusters"`
-	ClustersFile     string       `json:"clustersFile"`
-	CNB              CNBConfig    `json:"cnb"`
-	GitHub           GitHubConfig `json:"github"`
+	Listen           string         `json:"listen"`
+	AnnotationPrefix string         `json:"annotationPrefix"`
+	WorkDir          string         `json:"workDir"`
+	Auth             AuthConfig     `json:"auth"`
+	State            StateConfig    `json:"state"`
+	Namespaces       []string       `json:"namespaces"`
+	Clusters         []kube.Config  `json:"clusters"`
+	ClustersFile     string         `json:"clustersFile"`
+	CNB              CNBConfig      `json:"cnb"`
+	GitHub           GitHubConfig   `json:"github"`
 	Snapshot         SnapshotConfig `json:"snapshot"`
-	SeedSources      string       `json:"seedSources"`
+	SeedSources      string         `json:"seedSources"`
 }
 
 type AuthConfig struct {
@@ -86,6 +86,12 @@ type CNBConfig struct {
 	BranchPrefix string `json:"branchPrefix"`
 	API          string `json:"api"`
 	Git          string `json:"git"`
+	// DeployOnSuccess deploys a build's image once CNB reports the build succeeded (default true).
+	DeployOnSuccess *bool `json:"deployOnSuccess"`
+}
+
+func (c CNBConfig) EffectiveDeployOnSuccess() bool {
+	return c.DeployOnSuccess == nil || *c.DeployOnSuccess
 }
 
 type GitHubConfig struct {

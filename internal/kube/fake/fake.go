@@ -28,16 +28,16 @@ type resourceMeta struct {
 }
 
 var knownResources = map[string]resourceMeta{
-	"apis/apps/v1:deployments":                        {apiVersion: "apps/v1", kind: "Deployment", listKind: "DeploymentList", plural: "deployments"},
-	"apis/apps/v1:statefulsets":                       {apiVersion: "apps/v1", kind: "StatefulSet", listKind: "StatefulSetList", plural: "statefulsets"},
-	"apis/apps/v1:daemonsets":                         {apiVersion: "apps/v1", kind: "DaemonSet", listKind: "DaemonSetList", plural: "daemonsets"},
-	"apis/batch/v1:cronjobs":                          {apiVersion: "batch/v1", kind: "CronJob", listKind: "CronJobList", plural: "cronjobs"},
-	"api/v1:services":                                 {apiVersion: "v1", kind: "Service", listKind: "ServiceList", plural: "services"},
-	"api/v1:configmaps":                               {apiVersion: "v1", kind: "ConfigMap", listKind: "ConfigMapList", plural: "configmaps"},
-	"api/v1:secrets":                                  {apiVersion: "v1", kind: "Secret", listKind: "SecretList", plural: "secrets"},
-	"api/v1:persistentvolumeclaims":                   {apiVersion: "v1", kind: "PersistentVolumeClaim", listKind: "PersistentVolumeClaimList", plural: "persistentvolumeclaims"},
-	"apis/networking.k8s.io/v1:ingresses":             {apiVersion: "networking.k8s.io/v1", kind: "Ingress", listKind: "IngressList", plural: "ingresses"},
-	"apis/traefik.io/v1alpha1:middlewares":            {apiVersion: "traefik.io/v1alpha1", kind: "Middleware", listKind: "MiddlewareList", plural: "middlewares"},
+	"apis/apps/v1:deployments":             {apiVersion: "apps/v1", kind: "Deployment", listKind: "DeploymentList", plural: "deployments"},
+	"apis/apps/v1:statefulsets":            {apiVersion: "apps/v1", kind: "StatefulSet", listKind: "StatefulSetList", plural: "statefulsets"},
+	"apis/apps/v1:daemonsets":              {apiVersion: "apps/v1", kind: "DaemonSet", listKind: "DaemonSetList", plural: "daemonsets"},
+	"apis/batch/v1:cronjobs":               {apiVersion: "batch/v1", kind: "CronJob", listKind: "CronJobList", plural: "cronjobs"},
+	"api/v1:services":                      {apiVersion: "v1", kind: "Service", listKind: "ServiceList", plural: "services"},
+	"api/v1:configmaps":                    {apiVersion: "v1", kind: "ConfigMap", listKind: "ConfigMapList", plural: "configmaps"},
+	"api/v1:secrets":                       {apiVersion: "v1", kind: "Secret", listKind: "SecretList", plural: "secrets"},
+	"api/v1:persistentvolumeclaims":        {apiVersion: "v1", kind: "PersistentVolumeClaim", listKind: "PersistentVolumeClaimList", plural: "persistentvolumeclaims"},
+	"apis/networking.k8s.io/v1:ingresses":  {apiVersion: "networking.k8s.io/v1", kind: "Ingress", listKind: "IngressList", plural: "ingresses"},
+	"apis/traefik.io/v1alpha1:middlewares": {apiVersion: "traefik.io/v1alpha1", kind: "Middleware", listKind: "MiddlewareList", plural: "middlewares"},
 }
 
 var kindToPlural = map[string]resourceMeta{

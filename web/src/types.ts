@@ -94,6 +94,7 @@ export interface FerryEvent {
   sourceId?: string;
   commit?: string;
   logUrl?: string;
+  buildSn?: string;
   status: 'ok' | 'partial' | 'error' | 'queued' | 'started' | 'skipped' | string;
   message?: string;
   results?: DeployResult[];

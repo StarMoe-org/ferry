@@ -56,6 +56,11 @@ type Engine struct {
 
 // New constructs an Engine from pre-built Kubernetes clients and state store.
 func New(cfg *Config, clients []*kube.Client, store *state.Store) (*Engine, error) {
+	return newEngineWithPolling(cfg, clients, store, buildPollEvery, buildPollFor)
+}
+
+// newEngineWithPolling is New with the CNB build polling interval and deadline chosen by the caller.
+func newEngineWithPolling(cfg *Config, clients []*kube.Client, store *state.Store, pollEvery, pollFor time.Duration) (*Engine, error) {
 	if cfg == nil {
 		return nil, errors.New("nil config")
 	}
@@ -70,7 +75,7 @@ func New(cfg *Config, clients []*kube.Client, store *state.Store) (*Engine, erro
 		byCluster: byName,
 		store:     store,
 	}
-	e.initBuilder()
+	e.initBuilder(pollEvery, pollFor)
 	e.initSnapshots()
 	return e, nil
 }
@@ -858,4 +863,3 @@ func summarizeResults(results []state.Result) (status string, deployedAny bool) 
 		return "skipped", false
 	}
 }
-

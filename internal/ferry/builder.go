@@ -39,9 +39,13 @@ type buildManager struct {
 
 	locksMu sync.Mutex
 	locks   map[string]*sync.Mutex
+
+	// How often and how long to poll a started CNB build; tests shorten them.
+	pollEvery time.Duration
+	pollFor   time.Duration
 }
 
-func (e *Engine) initBuilder() {
+func (e *Engine) initBuilder(pollEvery, pollFor time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	bm := &buildManager{
 		eng:   e,
@@ -50,12 +54,16 @@ func (e *Engine) initBuilder() {
 		ctx:   ctx,
 		stop:  cancel,
 		locks: make(map[string]*sync.Mutex),
+
+		pollEvery: pollEvery,
+		pollFor:   pollFor,
 	}
 	for i := 0; i < buildWorkers; i++ {
 		bm.wg.Add(1)
 		go bm.worker()
 	}
 	e.buildQueue = bm
+	bm.resumeWatches()
 }
 
 func (b *buildManager) Close() {
@@ -152,14 +160,18 @@ func (b *buildManager) runJob(job buildJob) {
 	unlock()
 
 	if err == nil {
-		var logURL string
-		logURL, err = b.startCNBBuild(ctx, job.source, dstBranch, orphanSHA, job.sha)
+		var logURL, sn string
+		logURL, sn, err = b.startCNBBuild(ctx, job.source, dstBranch, orphanSHA, job.sha)
 		if err == nil {
-			_, _ = b.eng.store.UpdateEvent(context.Background(), job.eventID, func(ev *state.Event) {
+			ev, uErr := b.eng.store.UpdateEvent(context.Background(), job.eventID, func(ev *state.Event) {
 				ev.Status = "started"
 				ev.LogURL = logURL
+				ev.BuildSN = sn
 				ev.Message = ""
 			})
+			if uErr == nil && sn != "" {
+				b.watch(ev)
+			}
 			return
 		}
 	}
@@ -243,11 +255,11 @@ func (b *buildManager) mirrorRepo(ctx context.Context, src state.Source, sha str
 	return dstBranch, orphanSHA, nil
 }
 
-func (b *buildManager) startCNBBuild(ctx context.Context, src state.Source, branch, orphanSHA, sourceSHA string) (string, error) {
+func (b *buildManager) startCNBBuild(ctx context.Context, src state.Source, branch, orphanSHA, sourceSHA string) (logURL, sn string, err error) {
 	cfg := b.eng.cfg
 	rawPipe, err := os.ReadFile(cfg.CNB.PipelineFile)
 	if err != nil {
-		return "", fmt.Errorf("read pipelineFile: %w", err)
+		return "", "", fmt.Errorf("read pipelineFile: %w", err)
 	}
 	configYAML := strings.ReplaceAll(string(rawPipe), "__BRANCH__", branch)
 
@@ -267,13 +279,13 @@ func (b *buildManager) startCNBBuild(ctx context.Context, src state.Source, bran
 	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	u := strings.TrimRight(cfg.CNB.API, "/") + "/" + cfg.CNB.Repo + "/-/build/start"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.CNB.Token)
 	req.Header.Set("Content-Type", "application/json")
@@ -281,26 +293,27 @@ func (b *buildManager) startCNBBuild(ctx context.Context, src state.Source, bran
 
 	resp, err := b.hc.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("cnb build start request: %w", err)
+		return "", "", fmt.Errorf("cnb build start request: %w", err)
 	}
 	defer resp.Body.Close()
 	respData, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode/100 != 2 {
-		return "", fmt.Errorf("cnb build start %d: %s", resp.StatusCode, strings.TrimSpace(string(respData)))
+		return "", "", fmt.Errorf("cnb build start %d: %s", resp.StatusCode, strings.TrimSpace(string(respData)))
 	}
 
 	var parsed struct {
 		Success     *bool  `json:"success"`
 		BuildLogURL string `json:"buildLogUrl"`
+		SN          string `json:"sn"`
 		Message     string `json:"message"`
 	}
 	if err := json.Unmarshal(respData, &parsed); err == nil {
 		if parsed.Success != nil && !*parsed.Success {
-			return "", fmt.Errorf("cnb build start rejected: %s", strings.TrimSpace(string(respData)))
+			return "", "", fmt.Errorf("cnb build start rejected: %s", strings.TrimSpace(string(respData)))
 		}
-		return parsed.BuildLogURL, nil
+		return parsed.BuildLogURL, parsed.SN, nil
 	}
-	return "", nil
+	return "", "", nil
 }
 
 func basicAuthHeader(username, token string) string {

@@ -290,8 +290,20 @@ Queue builds and run them on 2 workers. Steps, exactly as ci-relay's `mirror` an
    - The event goes `queued` → `started`, with LogURL, or → `error` with a short message.
      Never put tokens in messages; git's stderr is safe.
 
-The CNB token cannot read build status (`repo-cnb-history:r` is missing). Do not poll. A build's
-completion shows up as its deploy (see linking above).
+Then poll `GET <cnb.api>/<cnb.repo>/-/build/status/<sn>` (bearer token, `Accept: application/json`)
+every 15 s for up to 45 minutes; the reply is
+`{"status":"success|error|...","pipelinesStatus":{"<sn>-001":{"stages":[{"id","name","status"}]}}}`.
+Store `sn` on the build event (`buildSn`) and resume polling after a restart.
+
+- `success`: unless `cnb.deployOnSuccess` is false, `Deploy(<imageRef>, commit[:12],
+  "https://github.com/<repo>/commit/<sha>")` as actor `cnb`. The build event becomes `ok` with
+  "deployed" or "built; nothing runs this image", or takes the deploy's `error`/`partial`.
+- `error`, `cancel`, `timeout`: the build event becomes `error`, naming the failed stage.
+- A build event that something else already settled (a deploy from the pipeline) is left alone.
+
+The pipeline cannot deploy by itself: the `CNB_TOKEN` inside a build is accepted by CNB only from
+CNB's runners, so `gitRead` rejects it when the pipeline calls `POST /deploy`. Its last stage only
+bumps manifests kept in git (`BUMP_GIT_ONLY=1 hack/bump.sh`).
 
 Sources with `builder: external` ignore webhooks. The UI shows the CI snippet for them instead.
 

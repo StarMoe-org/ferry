@@ -82,14 +82,15 @@ func (t Token) Info() TokenInfo {
 type Event struct {
 	ID       string    `json:"id"`
 	At       time.Time `json:"at"`
-	Kind     string    `json:"kind"`              // "deploy" | "rollout" | "rollback" | "build" | "snapshot" | "pause" | "resume"
-	Actor    string    `json:"actor"`             // user email/sub, "token:<name>", "github", "schedule", "ci"
-	Image    string    `json:"image,omitempty"`   // repo without tag
-	Tag      string    `json:"tag,omitempty"`     // image tag
-	Source   string    `json:"source,omitempty"`  // e.g. "github:org/app@1234567"
+	Kind     string    `json:"kind"`             // "deploy" | "rollout" | "rollback" | "build" | "snapshot" | "pause" | "resume"
+	Actor    string    `json:"actor"`            // user email/sub, "token:<name>", "github", "schedule", "ci", "cnb"
+	Image    string    `json:"image,omitempty"`  // repo without tag
+	Tag      string    `json:"tag,omitempty"`    // image tag
+	Source   string    `json:"source,omitempty"` // e.g. "github:org/app@1234567"
 	SourceID string    `json:"sourceId,omitempty"`
 	Commit   string    `json:"commit,omitempty"`
 	LogURL   string    `json:"logUrl,omitempty"`
+	BuildSN  string    `json:"buildSn,omitempty"` // CNB build serial number, polled until the build ends
 	Status   string    `json:"status"`            // "ok" | "partial" | "error" | "queued" | "started" | "skipped"
 	Message  string    `json:"message,omitempty"`
 	Results  []Result  `json:"results,omitempty"`

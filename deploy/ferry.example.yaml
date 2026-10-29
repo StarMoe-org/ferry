@@ -45,6 +45,7 @@ cnb:
   token: "${CNB_TOKEN}"
   imagePrefix: "docker.cnb.cool/org/builder"
   pipelineFile: "/etc/ferry/pipeline.yml"
+  deployOnSuccess: true   # deploy the image when CNB reports the build succeeded
   branchPrefix: "src/"
   api: "https://api.cnb.cool"
   git: "https://cnb.cool"

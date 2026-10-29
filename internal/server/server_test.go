@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -160,13 +161,24 @@ func TestOIDC_ES256_Groups_CSRF_CIAuth_Deploy_And_SPA(t *testing.T) {
 		},
 	})
 	kCl, _ := kSrv.Client("de")
-	st, err := state.NewFileStore(ctx, filepath.Join(t.TempDir(), "state.json"))
+	tmpDir := t.TempDir()
+	snapBare := filepath.Join(tmpDir, "clusters.git")
+	if err := exec.Command("git", "init", "--bare", "-b", "main", snapBare).Run(); err != nil {
+		t.Fatalf("git init bare: %v", err)
+	}
+	st, err := state.NewFileStore(ctx, filepath.Join(tmpDir, "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	cfg := &ferry.Config{
+		WorkDir:    filepath.Join(tmpDir, "work"),
 		Namespaces: []string{"app"},
+		Snapshot: ferry.SnapshotConfig{
+			Repo:   snapBare,
+			Branch: "main",
+			Dir:    "snapshots",
+		},
 		Auth: ferry.AuthConfig{
 			SessionKey: "test-session-secret-key",
 			OIDC: ferry.OIDCConfig{
@@ -413,5 +425,25 @@ func TestOIDC_ES256_Groups_CSRF_CIAuth_Deploy_And_SPA(t *testing.T) {
 	postRoot.Body.Close()
 	if postRoot.StatusCode != http.StatusUnauthorized || strings.TrimSpace(string(postRootBody)) != "bad signature" {
 		t.Fatalf("POST / = %d %q, want 401 bad signature", postRoot.StatusCode, string(postRootBody))
+	}
+
+	// 9. Legacy POST /snapshot compatibility (Compatibility #3):
+	// Requires CI bearer auth and returns {"status":"committed"|"unchanged","commit":"..."}.
+	unauthSnap, _ := http.Post(ts.URL+"/snapshot", "application/json", nil)
+	unauthSnap.Body.Close()
+	if unauthSnap.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /snapshot without token = %d, want 401", unauthSnap.StatusCode)
+	}
+	authedSnapReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/snapshot", nil)
+	authedSnapReq.Header.Set("Authorization", "Bearer "+createdTok.Token)
+	authedSnapResp, err := http.DefaultClient.Do(authedSnapReq)
+	if err != nil || authedSnapResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /snapshot with token = %v, %v", authedSnapResp, err)
+	}
+	var snapOut ferry.SnapshotResult
+	_ = json.NewDecoder(authedSnapResp.Body).Decode(&snapOut)
+	authedSnapResp.Body.Close()
+	if snapOut.Status != "committed" || snapOut.Commit == "" {
+		t.Fatalf("POST /snapshot body = %+v, want committed with sha", snapOut)
 	}
 }

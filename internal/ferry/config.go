@@ -45,10 +45,11 @@ type Config struct {
 }
 
 type AuthConfig struct {
-	Disabled   bool            `json:"disabled"`
-	SessionKey string          `json:"sessionKey"`
-	OIDC       OIDCConfig      `json:"oidc"`
-	GitRead    []GitReadTarget `json:"gitRead"`
+	Disabled     bool            `json:"disabled"`
+	SessionKey   string          `json:"sessionKey"`
+	SessionHours int             `json:"sessionHours"` // how long a browser sign-in lasts
+	OIDC         OIDCConfig      `json:"oidc"`
+	GitRead      []GitReadTarget `json:"gitRead"`
 }
 
 type OIDCConfig struct {
@@ -217,6 +218,9 @@ func (c *Config) ApplyDefaults() {
 	if c.WorkDir == "" {
 		c.WorkDir = "/work"
 	}
+	if c.Auth.SessionHours == 0 {
+		c.Auth.SessionHours = 12
+	}
 	if len(c.Auth.OIDC.Scopes) == 0 {
 		c.Auth.OIDC.Scopes = []string{"openid", "profile", "groups"}
 	}
@@ -277,6 +281,10 @@ func (c *Config) Validate() error {
 		if !cl.InCluster && strings.TrimSpace(cl.Server) == "" {
 			return fmt.Errorf("config: cluster %q requires server when inCluster is false", cl.Name)
 		}
+	}
+
+	if c.Auth.SessionHours < 0 {
+		return errors.New("config: auth.sessionHours must be positive")
 	}
 
 	if len(c.Namespaces) == 0 {

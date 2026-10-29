@@ -27,7 +27,6 @@ import (
 const (
 	sessionCookieName = "ferry_session"
 	oidcCookieName    = "ferry_oidc"
-	sessionTTL        = 12 * time.Hour
 	oidcFlowTTL       = 10 * time.Minute
 )
 
@@ -69,6 +68,14 @@ type browserAuth struct {
 	provider *oidc.Provider
 	verifier *oidc.IDTokenVerifier
 	oauthCfg oauth2.Config
+}
+
+// sessionTTL is how long a browser sign-in lasts (auth.sessionHours, 12 by default).
+func (a *browserAuth) sessionTTL() time.Duration {
+	if a.cfg.SessionHours <= 0 {
+		return 12 * time.Hour
+	}
+	return time.Duration(a.cfg.SessionHours) * time.Hour
 }
 
 func newBrowserAuth(cfg ferry.AuthConfig, hc *http.Client) *browserAuth {
@@ -310,7 +317,7 @@ func (a *browserAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Name:   name,
 		Email:  email,
 		Groups: groups,
-		Exp:    time.Now().Add(sessionTTL).Unix(),
+		Exp:    time.Now().Add(a.sessionTTL()).Unix(),
 	}
 	signed, err := a.signCookiePayload(sess)
 	if err != nil {
@@ -321,7 +328,7 @@ func (a *browserAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Name:     sessionCookieName,
 		Value:    signed,
 		Path:     "/",
-		MaxAge:   int(sessionTTL.Seconds()),
+		MaxAge:   int(a.sessionTTL().Seconds()),
 		HttpOnly: true,
 		Secure:   a.secure,
 		SameSite: http.SameSiteLaxMode,

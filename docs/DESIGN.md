@@ -99,13 +99,14 @@ state:                                  # exactly one
 
 auth:
   sessionKey: ${SESSION_KEY}            # HMAC key for cookies; random per start if empty (warn)
+  sessionHours: 12                      # how long a browser sign-in lasts [12]
   oidc:
     issuer: https://login.star.moe
     clientID: ferry
     clientSecret: ${OIDC_CLIENT_SECRET}
     scopes: [openid, profile, groups]   # [these]
     groupsClaim: groups                 # [groups]
-    allowedGroups: ["zeabur:admins"]    # any of these, or
+    allowedGroups: [admins]             # any of these (as the ID token spells them), or
     allowedUsers: []                    # preferred_username or sub
   # disabled: true                      # local development only: everyone is "dev" (log a loud warning)
 

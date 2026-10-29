@@ -5,6 +5,7 @@ workDir: /work
 auth:
   disabled: false
   sessionKey: "${SESSION_KEY}"
+  sessionHours: 12                      # how long a browser sign-in lasts
   oidc:
     issuer: "https://id.example.com"
     clientID: "ferry"

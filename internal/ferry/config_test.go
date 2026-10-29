@@ -52,6 +52,9 @@ snapshot:
 	if cfg.Auth.OIDC.ClientSecret != "s3cr3t$keep" {
 		t.Fatalf("ClientSecret = %q", cfg.Auth.OIDC.ClientSecret)
 	}
+	if cfg.Auth.SessionHours != 12 {
+		t.Fatalf("SessionHours default = %d, want 12", cfg.Auth.SessionHours)
+	}
 	if cfg.GitHub.TokenForOwner("org-a") != "ghp_alpha" || cfg.GitHub.TokenForOwner("org-b") != "ghp_bravo" {
 		t.Fatalf("GitHub.Tokens = %+v", cfg.GitHub.Tokens)
 	}
@@ -121,6 +124,16 @@ auth:
     clientID: "ferry"
     clientSecret: "sec"
     publicURL: "https://ferry.example.com"
+state: {file: "/tmp/s.json"}
+namespaces: ["app"]
+clusters:
+  - {name: de, inCluster: true}
+`,
+		},
+		{
+			name: "negative session hours",
+			yaml: `
+auth: {disabled: true, sessionHours: -1}
 state: {file: "/tmp/s.json"}
 namespaces: ["app"]
 clusters:

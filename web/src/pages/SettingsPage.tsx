@@ -81,6 +81,10 @@ export function SettingsPage({ me }: { me: MeResponse }) {
         `${res.status}${res.commit ? ` (${res.commit.slice(0, 12)})` : ''}`,
       );
       await loadAll();
+      if (res.status === 'queued') {
+        window.setTimeout(() => void loadAll(), 600);
+        window.setTimeout(() => void loadAll(), 2200);
+      }
     } catch (err) {
       setErrMsg(err instanceof Error ? err.message : String(err));
     } finally {

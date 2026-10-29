@@ -14,14 +14,29 @@ import (
 	"github.com/StarMoe-org/ferry/internal/state"
 )
 
-const argoTrackingAnnotation = "argocd.argoproj.io/tracking-id"
+const (
+	argoTrackingAnnotation = "argocd.argoproj.io/tracking-id"
+	maxDeploySourceChars   = 300
+)
 
 var (
 	ErrArgoManaged = errors.New("workload is managed by Argo CD")
 	ErrBadInput    = errors.New("invalid input")
 )
 
-var validTagRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`)
+var (
+	validImageRe = regexp.MustCompile(`^(?:[a-z0-9._-]+(?::[0-9]+)?/)?[a-z0-9./_-]+$`)
+	validTagRe   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+)
+
+// TruncateSource caps a deploy source string at 300 Unicode characters.
+func TruncateSource(s string) string {
+	runes := []rune(s)
+	if len(runes) > maxDeploySourceChars {
+		return string(runes[:maxDeploySourceChars])
+	}
+	return s
+}
 
 // Engine coordinates multi-cluster workload queries, rollouts, builds, and snapshots.
 type Engine struct {
@@ -187,12 +202,15 @@ func SplitImage(containerImage string) (repo, tag string) {
 func ValidateImageAndTag(image, tag string) error {
 	image = strings.TrimSpace(image)
 	tag = strings.TrimSpace(tag)
-	if image == "" || strings.ContainsAny(image, " \t\r\n@") {
+	if image == "" || strings.HasPrefix(image, "/") || strings.HasSuffix(image, "/") || strings.HasSuffix(image, ":") {
 		return fmt.Errorf("%w: invalid image repository %q", ErrBadInput, image)
 	}
 	lastSlash := strings.LastIndexByte(image, '/')
 	if colon := strings.LastIndexByte(image, ':'); colon > lastSlash {
 		return fmt.Errorf("%w: image %q must not include a tag", ErrBadInput, image)
+	}
+	if !validImageRe.MatchString(image) {
+		return fmt.Errorf("%w: invalid image repository %q", ErrBadInput, image)
 	}
 	if !validTagRe.MatchString(tag) {
 		return fmt.Errorf("%w: invalid tag %q", ErrBadInput, tag)
@@ -308,7 +326,7 @@ func extractAnnotations(obj map[string]any) (ann map[string]string, hasAnnotatio
 func (e *Engine) Deploy(ctx context.Context, actor, image, tag, source string, dryRun bool) ([]state.Result, *state.Event, error) {
 	image = strings.TrimSpace(image)
 	tag = strings.TrimSpace(tag)
-	source = strings.TrimSpace(source)
+	source = strings.TrimSpace(TruncateSource(source))
 	if err := ValidateImageAndTag(image, tag); err != nil {
 		return nil, nil, err
 	}
@@ -490,11 +508,22 @@ func (e *Engine) Rollout(ctx context.Context, actor string, req RolloutRequest) 
 	if !ok {
 		return state.Event{}, fmt.Errorf("%w: unsupported workload kind %q", ErrBadInput, req.Kind)
 	}
+	req.Image = strings.TrimSpace(req.Image)
+	req.Container = strings.TrimSpace(req.Container)
 	req.Tag = strings.TrimSpace(req.Tag)
+	if req.Image == "" && req.Container == "" {
+		return state.Event{}, fmt.Errorf("%w: image or container is required", ErrBadInput)
+	}
+	if req.Tag == "" && req.Image != "" {
+		lastSlash := strings.LastIndexByte(req.Image, '/')
+		if colon := strings.LastIndexByte(req.Image, ':'); colon > lastSlash {
+			req.Tag = req.Image[colon+1:]
+			req.Image = req.Image[:colon]
+		}
+	}
 	if !validTagRe.MatchString(req.Tag) {
 		return state.Event{}, fmt.Errorf("%w: invalid tag %q", ErrBadInput, req.Tag)
 	}
-	req.Image = strings.TrimSpace(req.Image)
 	if req.Image != "" {
 		if err := ValidateImageAndTag(req.Image, req.Tag); err != nil {
 			return state.Event{}, err
@@ -552,7 +581,7 @@ func (e *Engine) Rollout(ctx context.Context, actor string, req RolloutRequest) 
 
 	if len(toPatch) > 0 {
 		want := resolvedImage + ":" + req.Tag
-		cause := strings.TrimSpace(want + " rollout:" + actor)
+		cause := fmt.Sprintf("%s rolled out by %s", want, actor)
 		patchOps := buildImageJSONPatch(wk.PodSpecPtr, toPatch, want, hasAnnMap, cause)
 		pErr := cl.Patch(ctx, wk.itemPath(req.Namespace, req.Name)+"?fieldManager=ferry", "application/json-patch+json", patchOps, nil)
 		for _, c := range toPatch {
@@ -752,9 +781,11 @@ func (e *Engine) Pause(ctx context.Context, actor string, req PauseRequest) (sta
 	}
 
 	var val any
+	kind := "resume"
 	msg := "resumed"
 	if req.Paused {
 		val = "false"
+		kind = "pause"
 		msg = "paused"
 	}
 	patch := map[string]any{
@@ -774,7 +805,7 @@ func (e *Engine) Pause(ctx context.Context, actor string, req PauseRequest) (sta
 		primaryRepo, _ = SplitImage(cs[0].image)
 	}
 	return e.store.AppendEvent(ctx, state.Event{
-		Kind:    "pause",
+		Kind:    kind,
 		Actor:   actor,
 		Image:   primaryRepo,
 		Status:  "ok",

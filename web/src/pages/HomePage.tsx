@@ -8,6 +8,7 @@ import {
   History,
   Layers,
   PauseCircle,
+  PlayCircle,
   RotateCcw,
   Server,
   Sparkles,
@@ -436,6 +437,8 @@ export function EventKindIcon({ kind }: { kind: string }) {
       return <GitBranch size={15} strokeWidth={1.7} className="text-muted shrink-0" />;
     case 'pause':
       return <PauseCircle size={15} strokeWidth={1.7} className="text-muted shrink-0" />;
+    case 'resume':
+      return <PlayCircle size={15} strokeWidth={1.7} className="text-muted shrink-0" />;
     case 'snapshot':
       return <Server size={15} strokeWidth={1.7} className="text-muted shrink-0" />;
     default:

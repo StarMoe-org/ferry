@@ -86,7 +86,7 @@ export interface DeployResult {
 export interface FerryEvent {
   id: string;
   at: string;
-  kind: 'deploy' | 'rollout' | 'rollback' | 'build' | 'snapshot' | 'pause' | string;
+  kind: 'deploy' | 'rollout' | 'rollback' | 'build' | 'snapshot' | 'pause' | 'resume' | string;
   actor: string;
   image?: string;
   tag?: string;
@@ -132,6 +132,6 @@ export interface CreatedTokenResponse {
 }
 
 export interface SnapshotResponse {
-  status: 'committed' | 'unchanged' | string;
-  commit: string;
+  status: 'committed' | 'unchanged' | 'queued' | string;
+  commit?: string;
 }

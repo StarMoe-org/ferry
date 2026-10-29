@@ -85,6 +85,7 @@ const en = {
   kind_build: 'Build',
   kind_snapshot: 'Snapshot',
   kind_pause: 'Pause',
+  kind_resume: 'Resume',
 
   // Services page
   servicesTitle: 'Services',
@@ -263,7 +264,8 @@ const zhCN: Messages = {
   kind_rollback: '版本回滚',
   kind_build: '镜像构建',
   kind_snapshot: '集群快照',
-  kind_pause: '自动发布开关',
+  kind_pause: '暂停自动发布',
+  kind_resume: '恢复自动发布',
 
   servicesTitle: '服务工作负载',
   servicesSubtitle: '按容器镜像仓库聚合展示跨集群工作负载与当前运行标签。',

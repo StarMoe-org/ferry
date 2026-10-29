@@ -18,7 +18,7 @@ import {
 } from './HomePage';
 import type { FerryEvent } from '../types';
 
-const EVENT_KINDS = ['all', 'deploy', 'rollout', 'rollback', 'build', 'snapshot', 'pause'] as const;
+const EVENT_KINDS = ['all', 'deploy', 'rollout', 'rollback', 'build', 'snapshot', 'pause', 'resume'] as const;
 
 export function ActivityPage() {
   const { t, locale } = useI18n();

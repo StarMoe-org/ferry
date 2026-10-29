@@ -91,8 +91,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/deploy/preview", s.withSession(s.handleDeployPreview))
 	s.mux.HandleFunc("POST /api/deploy", s.withSessionOrCI(s.handleAPIDeploy))
 	s.mux.HandleFunc("POST /api/rollout", s.withSession(s.handleRollout))
+	s.mux.HandleFunc("POST /api/workloads/rollout", s.withSession(s.handleRollout))
 	s.mux.HandleFunc("POST /api/rollback", s.withSession(s.handleRollback))
 	s.mux.HandleFunc("POST /api/pause", s.withSession(s.handlePause))
+	s.mux.HandleFunc("POST /api/workloads/pause", s.withSession(s.handlePause))
 
 	s.mux.HandleFunc("GET /api/sources", s.withSession(s.handleListSources))
 	s.mux.HandleFunc("POST /api/sources", s.withSession(s.handleCreateSource))
@@ -186,17 +188,58 @@ type deployPayload struct {
 func (s *Server) handleLegacyDeploy(w http.ResponseWriter, r *http.Request) {
 	actor, ok, msg := s.ci.authenticate(r.Context(), r)
 	if !ok {
-		http.Error(w, msg, http.StatusUnauthorized)
+		writePlainText(w, http.StatusUnauthorized, msg)
 		return
 	}
-	var p deployPayload
-	if err := readJSONBody(w, r, &p); err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	results, _, err := s.eng.Deploy(r.Context(), actor, p.Image, p.Tag, p.Source, false)
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeJSONError(w, mapEngineErr(err), err.Error())
+		writePlainText(w, http.StatusBadRequest, `expected {"image", "tag", "source"}`)
+		return
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
+		writePlainText(w, http.StatusBadRequest, `expected {"image", "tag", "source"}`)
+		return
+	}
+	rawImg, hasImg := raw["image"]
+	rawTag, hasTag := raw["tag"]
+	if !hasImg || !hasTag || string(rawImg) == "null" || string(rawTag) == "null" {
+		writePlainText(w, http.StatusBadRequest, `expected {"image", "tag", "source"}`)
+		return
+	}
+	var img, tag string
+	if err := json.Unmarshal(rawImg, &img); err != nil {
+		writePlainText(w, http.StatusBadRequest, `expected {"image", "tag", "source"}`)
+		return
+	}
+	if err := json.Unmarshal(rawTag, &tag); err != nil {
+		writePlainText(w, http.StatusBadRequest, `expected {"image", "tag", "source"}`)
+		return
+	}
+	var src string
+	if rawSrc, ok := raw["source"]; ok && string(rawSrc) != "null" {
+		if err := json.Unmarshal(rawSrc, &src); err != nil {
+			writePlainText(w, http.StatusBadRequest, `expected {"image", "tag", "source"}`)
+			return
+		}
+	}
+	src = ferry.TruncateSource(src)
+
+	if img != strings.TrimSpace(img) || tag != strings.TrimSpace(tag) || ferry.ValidateImageAndTag(img, tag) != nil {
+		writePlainText(w, http.StatusBadRequest, "bad image or tag")
+		return
+	}
+
+	results, _, err := s.eng.Deploy(r.Context(), actor, img, tag, src, false)
+	if err != nil {
+		if errors.Is(err, ferry.ErrBadInput) {
+			writePlainText(w, http.StatusBadRequest, "bad image or tag")
+			return
+		}
+		writePlainText(w, mapEngineErr(err), err.Error())
 		return
 	}
 	writeDeployResults(w, results)
@@ -244,24 +287,22 @@ func writeDeployResults(w http.ResponseWriter, results []state.Result) {
 func (s *Server) handleLegacySnapshot(w http.ResponseWriter, r *http.Request) {
 	actor, ok, msg := s.ci.authenticate(r.Context(), r)
 	if !ok {
-		http.Error(w, msg, http.StatusUnauthorized)
+		writePlainText(w, http.StatusUnauthorized, msg)
 		return
 	}
-	res, err := s.eng.Snapshot(r.Context(), actor)
-	if err != nil {
-		writeJSONError(w, mapEngineErr(err), err.Error())
+	if err := s.eng.QueueSnapshot(actor); err != nil {
+		writePlainText(w, mapEngineErr(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	writePlainText(w, http.StatusAccepted, "snapshot queued")
 }
 
-func (s *Server) handleAPISnapshot(w http.ResponseWriter, r *http.Request, actor string) {
-	res, err := s.eng.Snapshot(r.Context(), actor)
-	if err != nil {
+func (s *Server) handleAPISnapshot(w http.ResponseWriter, _ *http.Request, actor string) {
+	if err := s.eng.QueueSnapshot(actor); err != nil {
 		writeJSONError(w, mapEngineErr(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	writeJSON(w, http.StatusAccepted, ferry.SnapshotResult{Status: "queued"})
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, _ string) {
@@ -279,7 +320,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, _ string) {
 		"cnbConfigured":           cfg.CNB.Repo != "",
 		"cnbRepo":                 cfg.CNB.Repo,
 		"cnbImagePrefix":          cfg.CNB.ImagePrefix,
-		"githubTokenConfigured":   cfg.GitHub.Token != "",
+		"githubTokenConfigured":   len(cfg.GitHub.Tokens) > 0,
 		"githubWebhookConfigured": cfg.GitHub.WebhookSecret != "",
 		"snapshotConfigured":      cfg.Snapshot.Repo != "",
 		"snapshotRepo":            cfg.Snapshot.Repo,
@@ -577,4 +618,10 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeJSONError(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+func writePlainText(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(code)
+	_, _ = w.Write([]byte(msg + "\n"))
 }

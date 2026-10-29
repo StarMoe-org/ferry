@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/StarMoe-org/ferry/internal/kube"
@@ -38,7 +39,7 @@ func TestRunsAndSplitImage(t *testing.T) {
 	}
 }
 
-func TestDeployDryRunArgoPausedCronJobRolloutAndRollback(t *testing.T) {
+func TestDeploySourceTruncationRolloutValidationChangeCauseAndResumeEvent(t *testing.T) {
 	ctx := context.Background()
 	de := fake.New()
 	defer de.Close()
@@ -183,10 +184,14 @@ func TestDeployDryRunArgoPausedCronJobRolloutAndRollback(t *testing.T) {
 		t.Fatalf("unexpected dryRun results: %+v", gotByKind)
 	}
 
-	// 2. Real deploy patches Deployment + CronJob with fieldManager=ferry & test+replace+change-cause, and links build event.
-	res, deployEv, err := eng.Deploy(ctx, "token:ci", img, "abcdef123456", "github:org/web@abcdef123456", false)
+	// 2. Real deploy truncates >300-char source to 300 chars, patches Deployment + CronJob, and links build event.
+	longSource := "https://github.com/org/web/commit/" + strings.Repeat("a", 400)
+	res, deployEv, err := eng.Deploy(ctx, "token:ci", img, "abcdef123456", longSource, false)
 	if err != nil || deployEv == nil || deployEv.Status != "ok" {
 		t.Fatalf("Deploy = %+v, %v", deployEv, err)
+	}
+	if len([]rune(deployEv.Source)) != 300 {
+		t.Fatalf("deployEv.Source len = %d, want 300", len([]rune(deployEv.Source)))
 	}
 	if len(res) != 6 {
 		t.Fatalf("len(res) = %d, want 6: %+v", len(res), res)
@@ -206,35 +211,73 @@ func TestDeployDryRunArgoPausedCronJobRolloutAndRollback(t *testing.T) {
 		if ops[0]["op"] != "test" || ops[1]["op"] != "replace" {
 			t.Fatalf("expected test+replace JSON patch ops, got %+v", ops)
 		}
+		lastOp := ops[len(ops)-1]
+		wantCause := img + ":abcdef123456 " + longSource[:300]
+		if lastOp["value"] != wantCause {
+			t.Fatalf("deploy change-cause = %q, want %q", lastOp["value"], wantCause)
+		}
 	}
 	linked, _ := st.GetEvent(buildEv.ID)
 	if linked.Status != "ok" || linked.Message != "deployed" {
 		t.Fatalf("build event not linked: %+v", linked)
 	}
 
-	// 3. Explicit Rollout updates paused edge-agent on sg, while refusing Argo CD workload on de.
+	// 3. Rollout validation & change-cause:
+	// (a) Both image and container empty -> ErrBadInput (400)
+	if _, err := eng.Rollout(ctx, "alice", RolloutRequest{
+		Cluster: "sg", Namespace: "app", Kind: "DaemonSet", Name: "edge-agent", Tag: "abcdef123456",
+	}); !errors.Is(err, ErrBadInput) {
+		t.Fatalf("expected ErrBadInput when both image and container are empty, got %v", err)
+	}
+
+	// (b) Argo CD workload -> ErrArgoManaged (409)
 	if _, err := eng.Rollout(ctx, "alice", RolloutRequest{
 		Cluster: "de", Namespace: "app", Kind: "Deployment", Name: "argo-svc", Image: img, Tag: "abcdef123456",
 	}); !errors.Is(err, ErrArgoManaged) {
 		t.Fatalf("expected ErrArgoManaged on Rollout, got %v", err)
 	}
+
+	// (c) Explicit Rollout updates paused edge-agent on sg with change-cause "<image> rolled out by <user>"!
 	rollEv, err := eng.Rollout(ctx, "alice", RolloutRequest{
 		Cluster: "sg", Namespace: "app", Kind: "DaemonSet", Name: "edge-agent", Image: img, Tag: "abcdef123456",
 	})
-	if err != nil || rollEv.Status != "ok" {
+	if err != nil || rollEv.Status != "ok" || rollEv.Kind != "rollout" {
 		t.Fatalf("Rollout paused DaemonSet = %+v, %v", rollEv, err)
 	}
+	sgPatches := sg.Patches()
+	if len(sgPatches) != 1 {
+		t.Fatalf("expected 1 patch on sg, got %d", len(sgPatches))
+	}
+	var sgOps []map[string]any
+	if err := json.Unmarshal(sgPatches[0].Body, &sgOps); err != nil {
+		t.Fatal(err)
+	}
+	gotRolloutCause := sgOps[len(sgOps)-1]["value"]
+	wantRolloutCause := img + ":abcdef123456 rolled out by alice"
+	if gotRolloutCause != wantRolloutCause {
+		t.Fatalf("rollout change-cause = %q, want %q", gotRolloutCause, wantRolloutCause)
+	}
 
-	// 4. Pause refuses Argo CD and resumes edge-agent cleanly.
+	// 4. Pause & Resume:
+	// - Refuses Argo CD
+	// - Pause records Kind=="pause"
+	// - Resume records Kind=="resume"!
 	if _, err := eng.Pause(ctx, "alice", PauseRequest{
 		Cluster: "de", Namespace: "app", Kind: "Deployment", Name: "argo-svc", Paused: true,
 	}); !errors.Is(err, ErrArgoManaged) {
 		t.Fatalf("expected ErrArgoManaged on Pause, got %v", err)
 	}
-	if _, err := eng.Pause(ctx, "alice", PauseRequest{
+	pauseEv, err := eng.Pause(ctx, "alice", PauseRequest{
+		Cluster: "de", Namespace: "app", Kind: "Deployment", Name: "api", Paused: true,
+	})
+	if err != nil || pauseEv.Kind != "pause" {
+		t.Fatalf("Pause event = %+v, %v (want kind=pause)", pauseEv, err)
+	}
+	resumeEv, err := eng.Pause(ctx, "alice", PauseRequest{
 		Cluster: "sg", Namespace: "app", Kind: "DaemonSet", Name: "edge-agent", Paused: false,
-	}); err != nil {
-		t.Fatalf("Resume DaemonSet: %v", err)
+	})
+	if err != nil || resumeEv.Kind != "resume" {
+		t.Fatalf("Resume event = %+v, %v (want kind=resume)", resumeEv, err)
 	}
 
 	// 5. Mutate nightly CronJob to another tag so Rollback of deployEv reports "changed since" for nightly,

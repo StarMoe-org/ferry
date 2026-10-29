@@ -30,13 +30,13 @@ import (
 )
 
 type fakeOIDCProvider struct {
-	srv         *httptest.Server
-	priv        *ecdsa.PrivateKey
-	lastNonce   string
-	lastChall   string
-	nextEmail   string
-	nextSub     string
-	nextGroups  []string
+	srv        *httptest.Server
+	priv       *ecdsa.PrivateKey
+	lastNonce  string
+	lastChall  string
+	nextEmail  string
+	nextSub    string
+	nextGroups []string
 }
 
 func newFakeOIDCProvider(t *testing.T) *fakeOIDCProvider {
@@ -129,7 +129,7 @@ func (p *fakeOIDCProvider) signES256Token(t *testing.T, claims map[string]any) s
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
-func TestOIDC_ES256_Groups_CSRF_CIAuth_Deploy_And_SPA(t *testing.T) {
+func TestOIDC_ES256_Groups_CSRF_CIAuth_LegacyDeploy_Rollout_And_AsyncSnapshot(t *testing.T) {
 	ctx := context.Background()
 	idp := newFakeOIDCProvider(t)
 
@@ -328,6 +328,16 @@ func TestOIDC_ES256_Groups_CSRF_CIAuth_Deploy_And_SPA(t *testing.T) {
 	}
 	csrfResp.Body.Close()
 
+	// Rollout HTTP 400 when both image and container are empty!
+	emptyRollReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/rollout", strings.NewReader(`{"cluster":"de","namespace":"app","kind":"Deployment","name":"web","tag":"v1"}`))
+	emptyRollReq.AddCookie(sessCookie)
+	emptyRollReq.Header.Set("Content-Type", "application/json")
+	emptyRollResp, _ := http.DefaultClient.Do(emptyRollReq)
+	emptyRollResp.Body.Close()
+	if emptyRollResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /api/rollout with empty image & container = %d, want 400", emptyRollResp.StatusCode)
+	}
+
 	// Create deploy token via POST /api/tokens with JSON Content-Type.
 	tokReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/tokens", strings.NewReader(`{"name":"gha"}`))
 	tokReq.AddCookie(sessCookie)
@@ -344,7 +354,7 @@ func TestOIDC_ES256_Groups_CSRF_CIAuth_Deploy_And_SPA(t *testing.T) {
 	tokResp.Body.Close()
 
 	// 6. Legacy POST /deploy compatibility:
-	// (a) Invalid bearer -> 401 with "needs a deploy token or a token that can read ..."
+	// (a) Invalid bearer -> 401 plain text with "needs a deploy token or a token that can read ..."
 	badDepReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/deploy", strings.NewReader(`{"image":"ghcr.io/org/web","tag":"v1"}`))
 	badDepReq.Header.Set("Authorization", "Bearer bad-tok")
 	badDepResp, _ := http.DefaultClient.Do(badDepReq)
@@ -354,8 +364,48 @@ func TestOIDC_ES256_Groups_CSRF_CIAuth_Deploy_And_SPA(t *testing.T) {
 		t.Fatalf("bad deploy auth = %d %q", badDepResp.StatusCode, string(badDepBody))
 	}
 
-	// (b) Deploy token works -> 200 JSON array of Results
-	depReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/deploy", bytes.NewBufferString(`{"image":"ghcr.io/org/web","tag":"v1","source":"github:org/web@1234"}`))
+	// (b) Malformed JSON or missing required keys -> 400 plain text `expected {"image", "tag", "source"}`
+	for _, badPayload := range []string{
+		`{not-json`,
+		`{}`,
+		`{"image":"ghcr.io/org/web"}`,
+		`{"tag":"v1"}`,
+	} {
+		r400, _ := http.NewRequest(http.MethodPost, ts.URL+"/deploy", strings.NewReader(badPayload))
+		r400.Header.Set("Authorization", "Bearer "+createdTok.Token)
+		resp400, _ := http.DefaultClient.Do(r400)
+		b400, _ := io.ReadAll(resp400.Body)
+		resp400.Body.Close()
+		if resp400.StatusCode != http.StatusBadRequest ||
+			!strings.HasPrefix(resp400.Header.Get("Content-Type"), "text/plain") ||
+			strings.TrimSpace(string(b400)) != `expected {"image", "tag", "source"}` {
+			t.Fatalf("POST /deploy(%s) = %d ct=%q body=%q", badPayload, resp400.StatusCode, resp400.Header.Get("Content-Type"), string(b400))
+		}
+	}
+
+	// (c) Invalid image or tag -> 400 plain text `bad image or tag`
+	for _, badImgTag := range []string{
+		`{"image":"","tag":"v1","source":"x"}`,
+		`{"image":"GHCR.IO/Upper/Web","tag":"v1","source":"x"}`,
+		`{"image":"ghcr.io/org/web:v1","tag":"v1","source":"x"}`,
+		`{"image":"ghcr.io/org/web","tag":"bad tag","source":"x"}`,
+		`{"image":"ghcr.io/org/web","tag":"","source":"x"}`,
+	} {
+		r400, _ := http.NewRequest(http.MethodPost, ts.URL+"/deploy", strings.NewReader(badImgTag))
+		r400.Header.Set("Authorization", "Bearer "+createdTok.Token)
+		resp400, _ := http.DefaultClient.Do(r400)
+		b400, _ := io.ReadAll(resp400.Body)
+		resp400.Body.Close()
+		if resp400.StatusCode != http.StatusBadRequest ||
+			!strings.HasPrefix(resp400.Header.Get("Content-Type"), "text/plain") ||
+			strings.TrimSpace(string(b400)) != "bad image or tag" {
+			t.Fatalf("POST /deploy(%s) = %d ct=%q body=%q", badImgTag, resp400.StatusCode, resp400.Header.Get("Content-Type"), string(b400))
+		}
+	}
+
+	// (d) Deploy token works -> 200 JSON array of Results, and source > 300 chars is truncated to 300 chars!
+	overlongSrc := "https://github.com/org/web/commit/" + strings.Repeat("f", 380)
+	depReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/deploy", bytes.NewBufferString(`{"image":"ghcr.io/org/web","tag":"v1","source":"`+overlongSrc+`"}`))
 	depReq.Header.Set("Authorization", "Bearer "+createdTok.Token)
 	depReq.Header.Set("Content-Type", "application/json")
 	depResp, err := http.DefaultClient.Do(depReq)
@@ -368,8 +418,12 @@ func TestOIDC_ES256_Groups_CSRF_CIAuth_Deploy_And_SPA(t *testing.T) {
 	if len(depResults) != 1 || depResults[0].Result != "deployed" {
 		t.Fatalf("unexpected deploy results: %+v", depResults)
 	}
+	depEvents := st.Events(state.EventsFilter{Kind: "deploy", Limit: 1})
+	if len(depEvents) == 0 || len([]rune(depEvents[0].Source)) != 300 || depEvents[0].Source != overlongSrc[:300] {
+		t.Fatalf("legacy /deploy did not truncate source to 300 chars: len=%d", len(depEvents[0].Source))
+	}
 
-	// (c) gitRead bearer works and caches positive result for 10m across multiple calls!
+	// (e) gitRead bearer works and caches positive result for 10m across multiple calls!
 	probesBefore := gitProbes.Load()
 	for i := 0; i < 2; i++ {
 		grReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/deploy", bytes.NewBufferString(`{"image":"ghcr.io/org/web","tag":"v1"}`))
@@ -384,7 +438,7 @@ func TestOIDC_ES256_Groups_CSRF_CIAuth_Deploy_And_SPA(t *testing.T) {
 		t.Fatalf("expected 1 gitRead HTTP probe due to 10m cache, got %d", got)
 	}
 
-	// (d) Cluster PATCH error returns HTTP 500 with Results JSON array (preserving bump.sh contract!).
+	// (f) Cluster PATCH error returns HTTP 500 with Results JSON array (preserving bump.sh contract!).
 	kSrv.SetForbidden("PATCH", "deployments", true)
 	errDepReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/deploy", bytes.NewBufferString(`{"image":"ghcr.io/org/web","tag":"v2"}`))
 	errDepReq.Header.Set("Authorization", "Bearer "+createdTok.Token)
@@ -398,6 +452,7 @@ func TestOIDC_ES256_Groups_CSRF_CIAuth_Deploy_And_SPA(t *testing.T) {
 	if len(errResults) != 1 || errResults[0].Result != "error" {
 		t.Fatalf("expected error Result in 500 body, got %+v", errResults)
 	}
+	kSrv.SetForbidden("PATCH", "deployments", false)
 
 	// 7. SPA serving & Cache-Control headers.
 	spaRoot, _ := http.Get(ts.URL + "/services")
@@ -428,22 +483,40 @@ func TestOIDC_ES256_Groups_CSRF_CIAuth_Deploy_And_SPA(t *testing.T) {
 	}
 
 	// 9. Legacy POST /snapshot compatibility (Compatibility #3):
-	// Requires CI bearer auth and returns {"status":"committed"|"unchanged","commit":"..."}.
+	// Immediately returns 202 Accepted ("snapshot queued") and executes in the background
+	// decoupled from the HTTP request context!
 	unauthSnap, _ := http.Post(ts.URL+"/snapshot", "application/json", nil)
 	unauthSnap.Body.Close()
 	if unauthSnap.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("POST /snapshot without token = %d, want 401", unauthSnap.StatusCode)
 	}
-	authedSnapReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/snapshot", nil)
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	authedSnapReq, _ := http.NewRequestWithContext(reqCtx, http.MethodPost, ts.URL+"/snapshot", nil)
 	authedSnapReq.Header.Set("Authorization", "Bearer "+createdTok.Token)
 	authedSnapResp, err := http.DefaultClient.Do(authedSnapReq)
-	if err != nil || authedSnapResp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /snapshot with token = %v, %v", authedSnapResp, err)
+	if err != nil || authedSnapResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /snapshot with token = %v, %v (want 202 Accepted)", authedSnapResp, err)
 	}
-	var snapOut ferry.SnapshotResult
-	_ = json.NewDecoder(authedSnapResp.Body).Decode(&snapOut)
+	snapBody, _ := io.ReadAll(authedSnapResp.Body)
 	authedSnapResp.Body.Close()
-	if snapOut.Status != "committed" || snapOut.Commit == "" {
-		t.Fatalf("POST /snapshot body = %+v, want committed with sha", snapOut)
+	cancelReq() // Cancel client request context immediately after 202!
+	if strings.TrimSpace(string(snapBody)) != "snapshot queued" {
+		t.Fatalf("POST /snapshot body = %q, want \"snapshot queued\"", string(snapBody))
+	}
+
+	// Wait for background snapshot event to finish with Status="ok" and Message="committed"!
+	deadline := time.Now().Add(5 * time.Second)
+	var snapDone state.Event
+	for time.Now().Before(deadline) {
+		evs := st.Events(state.EventsFilter{Kind: "snapshot", Limit: 1})
+		if len(evs) > 0 {
+			snapDone = evs[0]
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if snapDone.Status != "ok" || snapDone.Message != "committed" || snapDone.Commit == "" {
+		t.Fatalf("background POST /snapshot event = %+v, want ok/committed", snapDone)
 	}
 }

@@ -82,7 +82,7 @@ func (t Token) Info() TokenInfo {
 type Event struct {
 	ID       string    `json:"id"`
 	At       time.Time `json:"at"`
-	Kind     string    `json:"kind"`              // "deploy" | "rollout" | "rollback" | "build" | "snapshot" | "pause"
+	Kind     string    `json:"kind"`              // "deploy" | "rollout" | "rollback" | "build" | "snapshot" | "pause" | "resume"
 	Actor    string    `json:"actor"`             // user email/sub, "token:<name>", "github", "schedule", "ci"
 	Image    string    `json:"image,omitempty"`   // repo without tag
 	Tag      string    `json:"tag,omitempty"`     // image tag

@@ -212,7 +212,7 @@ func seedDemoClusters(de, sg, jp *fake.Server) {
 		}),
 		demoDeployment("web-portal", "app", portalImg+":9f203d14aa80", 2, 2, map[string]any{
 			"ferry.star.moe/auto-deploy": "false",
-			"kubernetes.io/change-cause": portalImg + ":9f203d14aa80 rollout:dev@localhost",
+			"kubernetes.io/change-cause": portalImg + ":9f203d14aa80 rolled out by dev@localhost",
 		}),
 		demoDaemonSet("edge-agent", "edge", agentImg+":71dc08fe4419", 3, 3, nil),
 		demoDeployment("core-ingress", "edge", argoImg+":v1.14.0", 2, 2, map[string]any{

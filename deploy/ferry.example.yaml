@@ -54,6 +54,8 @@ github:
   webhookSecret: "${GITHUB_WEBHOOK_SECRET}"
   # JSON object {"<owner>": "<token>"} via env expansion, or a YAML map:
   tokens: ${GH_TOKENS}
+  # Optional, same shape: tokens for listing/creating webhooks where the tokens above lack that permission
+  # hookTokens: ${GH_HOOK_TOKENS}
 
 # Optional: Daily cleaned manifest + SOPS secret snapshot to Git
 snapshot:

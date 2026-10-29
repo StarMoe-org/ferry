@@ -161,7 +161,7 @@ func (e *Engine) GetWebhookStatus(ctx context.Context, sourceID string) (Webhook
 	if len(parts) != 2 {
 		return WebhookStatus{}, fmt.Errorf("%w: invalid repo %q", ErrBadInput, src.Repo)
 	}
-	tok := e.cfg.GitHub.TokenForOwner(parts[0])
+	tok := e.cfg.GitHub.HookTokenForOwner(parts[0])
 	if tok == "" {
 		return WebhookStatus{
 			Status:     "no-permission",
@@ -274,7 +274,7 @@ func (e *Engine) SetupWebhook(ctx context.Context, sourceID, publicURL string) (
 	if len(parts) != 2 {
 		return WebhookStatus{}, fmt.Errorf("%w: invalid repo %q", ErrBadInput, src.Repo)
 	}
-	tok := e.cfg.GitHub.TokenForOwner(parts[0])
+	tok := e.cfg.GitHub.HookTokenForOwner(parts[0])
 	if tok == "" {
 		return WebhookStatus{
 			Status:     "no-permission",

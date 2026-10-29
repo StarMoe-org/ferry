@@ -363,6 +363,9 @@ func (e *Engine) scrubSecrets(s string) string {
 	for _, tok := range e.cfg.GitHub.Tokens {
 		secrets = append(secrets, tok)
 	}
+	for _, tok := range e.cfg.GitHub.HookTokens {
+		secrets = append(secrets, tok)
+	}
 	for _, cl := range e.cfg.Clusters {
 		secrets = append(secrets, cl.Token)
 	}

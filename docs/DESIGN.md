@@ -117,6 +117,7 @@ deployAuth:
 github:
   webhookSecret: ${WEBHOOK_SECRET}
   tokens: ${GH_TOKENS}                  # JSON object {"<owner>": "<token>"}, valid YAML after expansion
+  hookTokens: ${GH_HOOK_TOKENS}         # optional, same shape: used for webhooks instead of tokens
 
 cnb:                                    # optional builder
   repo: StarMoe-org/ci                  # where sources are mirrored and built

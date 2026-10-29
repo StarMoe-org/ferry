@@ -226,3 +226,19 @@ func TestDockerfileTiniEntrypointAndPipelineContract(t *testing.T) {
 		t.Fatalf("deploy/pipeline.yml did not render src/my-app.api_trigger_build: %+v", parsed)
 	}
 }
+
+func TestHookTokenForOwnerFallsBackToTokens(t *testing.T) {
+	g := GitHubConfig{
+		Tokens:     map[string]string{"org-a": "contents-a", "org-b": "contents-b"},
+		HookTokens: map[string]string{"ORG-A": "hooks-a"},
+	}
+	if got := g.HookTokenForOwner("org-a"); got != "hooks-a" {
+		t.Fatalf("org-a hook token = %q, want hooks-a", got)
+	}
+	if got := g.HookTokenForOwner("org-b"); got != "contents-b" {
+		t.Fatalf("org-b hook token = %q, want the contents token", got)
+	}
+	if got := g.TokenForOwner("org-a"); got != "contents-a" {
+		t.Fatalf("org-a token = %q, want contents-a", got)
+	}
+}

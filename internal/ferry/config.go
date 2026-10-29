@@ -95,7 +95,10 @@ func (c CNBConfig) EffectiveDeployOnSuccess() bool {
 }
 
 type GitHubConfig struct {
-	Tokens        map[string]string `json:"tokens"`
+	Tokens map[string]string `json:"tokens"`
+	// HookTokens, by owner, list and create repository webhooks when the owner's entry in Tokens
+	// cannot (fine-grained tokens are often split by permission). Optional.
+	HookTokens    map[string]string `json:"hookTokens"`
 	WebhookSecret string            `json:"webhookSecret"`
 	API           string            `json:"api"`
 	Git           string            `json:"git"`
@@ -103,20 +106,32 @@ type GitHubConfig struct {
 
 // TokenForOwner returns the configured GitHub personal/fine-grained token for owner, if any.
 func (g GitHubConfig) TokenForOwner(owner string) string {
-	if len(g.Tokens) == 0 || owner == "" {
-		return ""
-	}
-	if tok, ok := g.Tokens[owner]; ok {
+	return tokenForOwner(g.Tokens, owner)
+}
+
+// HookTokenForOwner returns the token for owner's webhooks: hookTokens[owner], else tokens[owner].
+func (g GitHubConfig) HookTokenForOwner(owner string) string {
+	if tok := tokenForOwner(g.HookTokens, owner); tok != "" {
 		return tok
 	}
-	keys := make([]string, 0, len(g.Tokens))
-	for k := range g.Tokens {
+	return tokenForOwner(g.Tokens, owner)
+}
+
+func tokenForOwner(tokens map[string]string, owner string) string {
+	if len(tokens) == 0 || owner == "" {
+		return ""
+	}
+	if tok, ok := tokens[owner]; ok {
+		return tok
+	}
+	keys := make([]string, 0, len(tokens))
+	for k := range tokens {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
 		if strings.EqualFold(k, owner) {
-			return g.Tokens[k]
+			return tokens[k]
 		}
 	}
 	return ""

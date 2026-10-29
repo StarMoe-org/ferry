@@ -124,8 +124,8 @@ func (e *Engine) resolveGitHubBranchSHA(ctx context.Context, repo, branch string
 		return "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	if e.cfg.GitHub.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+e.cfg.GitHub.Token)
+	if tok := e.cfg.GitHub.TokenForOwner(parts[0]); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	hc := &http.Client{Timeout: 15 * time.Second}
 	resp, err := hc.Do(req)
@@ -157,17 +157,17 @@ func (e *Engine) GetWebhookStatus(ctx context.Context, sourceID string) (Webhook
 	if pub != "" {
 		wantURL = pub + "/webhook/github"
 	}
-	if e.cfg.GitHub.Token == "" {
-		return WebhookStatus{
-			Status:     "no-permission",
-			WebhookURL: wantURL,
-			Message:    "github.token is not configured",
-		}, nil
-	}
-
 	parts := strings.Split(src.Repo, "/")
 	if len(parts) != 2 {
 		return WebhookStatus{}, fmt.Errorf("%w: invalid repo %q", ErrBadInput, src.Repo)
+	}
+	tok := e.cfg.GitHub.TokenForOwner(parts[0])
+	if tok == "" {
+		return WebhookStatus{
+			Status:     "no-permission",
+			WebhookURL: wantURL,
+			Message:    fmt.Sprintf("github.tokens[%q] is not configured", parts[0]),
+		}, nil
 	}
 	u := fmt.Sprintf("%s/repos/%s/%s/hooks",
 		strings.TrimRight(e.cfg.GitHub.API, "/"),
@@ -179,7 +179,7 @@ func (e *Engine) GetWebhookStatus(ctx context.Context, sourceID string) (Webhook
 		return WebhookStatus{}, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Authorization", "Bearer "+e.cfg.GitHub.Token)
+	req.Header.Set("Authorization", "Bearer "+tok)
 
 	hc := &http.Client{Timeout: 15 * time.Second}
 	resp, err := hc.Do(req)
@@ -270,11 +270,16 @@ func (e *Engine) SetupWebhook(ctx context.Context, sourceID, publicURL string) (
 	if e.cfg.GitHub.WebhookSecret == "" {
 		return WebhookStatus{}, ErrNotConfigured
 	}
-	if e.cfg.GitHub.Token == "" {
+	parts := strings.Split(src.Repo, "/")
+	if len(parts) != 2 {
+		return WebhookStatus{}, fmt.Errorf("%w: invalid repo %q", ErrBadInput, src.Repo)
+	}
+	tok := e.cfg.GitHub.TokenForOwner(parts[0])
+	if tok == "" {
 		return WebhookStatus{
 			Status:     "no-permission",
 			WebhookURL: wantURL,
-			Message:    "github.token is not configured",
+			Message:    fmt.Sprintf("github.tokens[%q] is not configured", parts[0]),
 		}, nil
 	}
 
@@ -283,7 +288,6 @@ func (e *Engine) SetupWebhook(ctx context.Context, sourceID, publicURL string) (
 		return cur, nil
 	}
 
-	parts := strings.Split(src.Repo, "/")
 	u := fmt.Sprintf("%s/repos/%s/%s/hooks",
 		strings.TrimRight(e.cfg.GitHub.API, "/"),
 		url.PathEscape(parts[0]),
@@ -309,7 +313,7 @@ func (e *Engine) SetupWebhook(ctx context.Context, sourceID, publicURL string) (
 		return WebhookStatus{}, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Authorization", "Bearer "+e.cfg.GitHub.Token)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
 
 	hc := &http.Client{Timeout: 15 * time.Second}

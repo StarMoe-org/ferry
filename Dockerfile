@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 
-FROM node:22-alpine AS web
+FROM --platform=$BUILDPLATFORM node:22-alpine AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY web/ ./
 RUN npm run build
 
-FROM golang:1.25-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 ARG VERSION=dev
@@ -21,7 +21,7 @@ COPY --from=web /web/dist ./web/dist
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/ferry ./cmd/ferry
 
-FROM alpine:3.21 AS sops
+FROM --platform=$BUILDPLATFORM alpine:3.21 AS sops
 ARG TARGETARCH=amd64
 ARG SOPS_VERSION=3.13.3
 ARG SOPS_SHA256_AMD64=e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b
@@ -38,12 +38,14 @@ RUN apk add --no-cache ca-certificates curl && \
     chmod 0755 /usr/local/bin/sops
 
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates git && \
+RUN apk add --no-cache ca-certificates git tini && \
     mkdir -p /work && chown 65532:65532 /work
 COPY --from=sops /usr/local/bin/sops /usr/local/bin/sops
 COPY --from=build /out/ferry /usr/local/bin/ferry
 USER 65532:65532
+ENV HOME=/tmp
 WORKDIR /work
+VOLUME ["/work"]
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/ferry"]
+ENTRYPOINT ["tini", "--", "ferry"]
 CMD ["-config", "/etc/ferry/ferry.yaml"]

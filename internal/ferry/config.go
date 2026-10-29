@@ -89,10 +89,31 @@ type CNBConfig struct {
 }
 
 type GitHubConfig struct {
-	Token         string `json:"token"`
-	WebhookSecret string `json:"webhookSecret"`
-	API           string `json:"api"`
-	Git           string `json:"git"`
+	Tokens        map[string]string `json:"tokens"`
+	WebhookSecret string            `json:"webhookSecret"`
+	API           string            `json:"api"`
+	Git           string            `json:"git"`
+}
+
+// TokenForOwner returns the configured GitHub personal/fine-grained token for owner, if any.
+func (g GitHubConfig) TokenForOwner(owner string) string {
+	if len(g.Tokens) == 0 || owner == "" {
+		return ""
+	}
+	if tok, ok := g.Tokens[owner]; ok {
+		return tok
+	}
+	keys := make([]string, 0, len(g.Tokens))
+	for k := range g.Tokens {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if strings.EqualFold(k, owner) {
+			return g.Tokens[k]
+		}
+	}
+	return ""
 }
 
 type SnapshotConfig struct {
@@ -101,9 +122,17 @@ type SnapshotConfig struct {
 	Dir          string         `json:"dir"`
 	Username     string         `json:"username"`
 	Token        string         `json:"token"`
+	SOPS         *bool          `json:"sops"`
 	AgePublicKey string         `json:"agePublicKey"`
 	HourUTC      *int           `json:"hourUTC"`
 	Author       SnapshotAuthor `json:"author"`
+}
+
+func (s SnapshotConfig) EffectiveSOPS() bool {
+	if s.SOPS == nil {
+		return true
+	}
+	return *s.SOPS
 }
 
 func (s SnapshotConfig) EffectiveHourUTC() int {
@@ -193,6 +222,10 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Snapshot.Dir == "" {
 		c.Snapshot.Dir = "snapshots"
+	}
+	if c.Snapshot.SOPS == nil {
+		b := true
+		c.Snapshot.SOPS = &b
 	}
 	if c.Snapshot.HourUTC == nil {
 		h := 19

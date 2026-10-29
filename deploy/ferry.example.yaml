@@ -50,8 +50,9 @@ cnb:
   git: "https://cnb.cool"
 
 github:
-  token: "${GITHUB_TOKEN}"
   webhookSecret: "${GITHUB_WEBHOOK_SECRET}"
+  # JSON object {"<owner>": "<token>"} via env expansion, or a YAML map:
+  tokens: ${GH_TOKENS}
 
 # Optional: Daily cleaned manifest + SOPS secret snapshot to Git
 snapshot:
@@ -60,7 +61,8 @@ snapshot:
   dir: "snapshots"
   username: "x-access-token"
   token: "${SNAPSHOT_GIT_TOKEN}"
-  agePublicKey: "age1example00000000000000000000000000000000000000000000000000"
+  sops: true             # runs `sops -e -i` inside the cloned repo (keys from .sops.yaml)
+  agePublicKey: ""       # optional explicit age recipient override
   hourUTC: 19
   author:
     name: "ferry"

@@ -3,12 +3,15 @@ package ferry
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"sigs.k8s.io/yaml"
 )
 
-func TestParseConfigEnvExpansionAndClustersFile(t *testing.T) {
+func TestParseConfigEnvExpansionGitHubTokensAndClustersFile(t *testing.T) {
 	t.Setenv("OIDC_SECRET", "s3cr3t$keep")
-	t.Setenv("GH_TOK", "ghp_test")
+	t.Setenv("GH_TOKENS", `{"org-a":"ghp_alpha","org-b":"ghp_bravo"}`)
 
 	dir := t.TempDir()
 	cf := filepath.Join(dir, "clusters.json")
@@ -37,7 +40,7 @@ clusters:
     inCluster: true
 clustersFile: "` + cf + `"
 github:
-  token: "${GH_TOK}"
+  tokens: ${GH_TOKENS}
 snapshot:
   hourUTC: 0
 `)
@@ -49,8 +52,17 @@ snapshot:
 	if cfg.Auth.OIDC.ClientSecret != "s3cr3t$keep" {
 		t.Fatalf("ClientSecret = %q", cfg.Auth.OIDC.ClientSecret)
 	}
-	if cfg.GitHub.Token != "ghp_test" {
-		t.Fatalf("GitHub.Token = %q", cfg.GitHub.Token)
+	if cfg.GitHub.TokenForOwner("org-a") != "ghp_alpha" || cfg.GitHub.TokenForOwner("org-b") != "ghp_bravo" {
+		t.Fatalf("GitHub.Tokens = %+v", cfg.GitHub.Tokens)
+	}
+	if cfg.GitHub.TokenForOwner("ORG-A") != "ghp_alpha" {
+		t.Fatalf("expected case-insensitive owner lookup, got %q", cfg.GitHub.TokenForOwner("ORG-A"))
+	}
+	if cfg.GitHub.TokenForOwner("missing") != "" {
+		t.Fatalf("unexpected token for missing owner")
+	}
+	if !cfg.Snapshot.EffectiveSOPS() {
+		t.Fatalf("expected Snapshot.EffectiveSOPS default true")
 	}
 	if len(cfg.Clusters) != 3 || cfg.Clusters[1].Name != "sg" || cfg.Clusters[1].CAData != "cGVt" {
 		t.Fatalf("Clusters = %+v", cfg.Clusters)
@@ -157,5 +169,60 @@ func TestLoadSeedSources(t *testing.T) {
 	}
 	if got[1].Repo != "org/worker" || got[1].Branch != "main" || got[1].Image != "worker" {
 		t.Fatalf("got[1] = %+v", got[1])
+	}
+}
+
+func TestDockerfileTiniEntrypointAndPipelineContract(t *testing.T) {
+	repoRoot := filepath.Join("..", "..")
+
+	dfBytes, err := os.ReadFile(filepath.Join(repoRoot, "Dockerfile"))
+	if err != nil {
+		t.Fatalf("read Dockerfile: %v", err)
+	}
+	df := string(dfBytes)
+	lastFrom := strings.LastIndex(df, "\nFROM ")
+	if lastFrom < 0 {
+		t.Fatalf("Dockerfile missing final FROM stage:\n%s", df)
+	}
+	finalStage := df[lastFrom:]
+	if !strings.Contains(finalStage, "tini") {
+		t.Fatalf("final Dockerfile stage must install tini:\n%s", finalStage)
+	}
+	if !strings.Contains(finalStage, `ENTRYPOINT ["tini", "--", "ferry"]`) {
+		t.Fatalf("final Dockerfile stage must set ENTRYPOINT [\"tini\", \"--\", \"ferry\"]:\n%s", finalStage)
+	}
+
+	pipeBytes, err := os.ReadFile(filepath.Join(repoRoot, "deploy", "pipeline.yml"))
+	if err != nil {
+		t.Fatalf("read deploy/pipeline.yml: %v", err)
+	}
+	pipe := string(pipeBytes)
+	for _, want := range []string{
+		`"__BRANCH__":`,
+		`api_trigger_build:`,
+		`IMAGE_NAME`,
+		`SRC_REPO`,
+		`SRC_SHA`,
+		`BUILD_ARGS`,
+		`hack/bump.sh`,
+	} {
+		if !strings.Contains(pipe, want) {
+			t.Fatalf("deploy/pipeline.yml missing %q:\n%s", want, pipe)
+		}
+	}
+	for _, forbidden := range []string{"RELAY_URL", "SOURCE_REPO", "SOURCE_SHA"} {
+		if strings.Contains(pipe, forbidden) {
+			t.Fatalf("deploy/pipeline.yml must not introduce %q:\n%s", forbidden, pipe)
+		}
+	}
+
+	rendered := strings.ReplaceAll(pipe, "__BRANCH__", "src/my-app")
+	var parsed map[string]any
+	if err := yaml.Unmarshal([]byte(rendered), &parsed); err != nil {
+		t.Fatalf("deploy/pipeline.yml invalid YAML: %v", err)
+	}
+	branchCfg, ok := parsed["src/my-app"].(map[string]any)
+	if !ok || branchCfg["api_trigger_build"] == nil {
+		t.Fatalf("deploy/pipeline.yml did not render src/my-app.api_trigger_build: %+v", parsed)
 	}
 }

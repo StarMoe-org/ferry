@@ -1,39 +1,29 @@
 # Default CNB build pipeline template.
-# Ferry substitutes __BRANCH__ with <branchPrefix><owner>--<repo> before calling /-/build/start.
-__BRANCH__:
-  api_trigger:
-    - docker:
-        image: alpine:3.21
+# Ferry replaces __BRANCH__ with <branchPrefix><image> before calling /-/build/start.
+# Adjust org/infra.git in the deploy stage to match your infra repository containing hack/bump.sh.
+"__BRANCH__":
+  api_trigger_build:
+    - name: build
       services:
         - docker
       stages:
-        - name: build and push
+        - name: docker build
           script: |
             set -eu
-            TAG=$(printf '%s' "${SOURCE_SHA}" | cut -c1-12)
-            IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}/${IMAGE_NAME}"
-            echo "${CNB_TOKEN}" | docker login "${CNB_DOCKER_REGISTRY}" -u "${CNB_TOKEN_USER_NAME}" --password-stdin
-
-            set --
-            for kv in ${BUILD_ARGS:-}; do
-              set -- "$@" --build-arg "$kv"
-            done
-            docker build "$@" -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" .
-            docker push "${IMAGE}:${TAG}"
-            docker push "${IMAGE}:latest"
-
-        - name: notify ferry
+            IMG="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}/${IMAGE_NAME}"
+            TAG=$(echo "$SRC_SHA" | cut -c1-12)
+            echo "$CNB_TOKEN" | docker login -u "$CNB_TOKEN_USER_NAME" --password-stdin "$CNB_DOCKER_REGISTRY"
+            docker pull -q "$IMG:latest" || true
+            docker build --cache-from "$IMG:latest" --build-arg BUILDKIT_INLINE_CACHE=1 \
+              --label org.opencontainers.image.source="https://github.com/$SRC_REPO" \
+              --label org.opencontainers.image.revision="$SRC_SHA" \
+              $BUILD_ARGS -t "$IMG:$TAG" -t "$IMG:latest" .
+            docker push -q "$IMG:$TAG"
+            docker push -q "$IMG:latest"
+        - name: deploy
           script: |
             set -eu
-            apk add --no-cache curl jq >/dev/null
-            TAG=$(printf '%s' "${SOURCE_SHA}" | cut -c1-12)
-            IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}/${IMAGE_NAME}"
-            PAYLOAD=$(jq -nc \
-              --arg image "${IMAGE}" \
-              --arg tag "${TAG}" \
-              --arg source "github:${SOURCE_REPO}@${TAG}" \
-              '{image:$image, tag:$tag, source:$source}')
-            curl -fsS -X POST "${RELAY_URL%/}/deploy" \
-              -H "Authorization: Bearer ${CNB_TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "${PAYLOAD}"
+            IMG="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}/${IMAGE_NAME}"
+            TAG=$(echo "$SRC_SHA" | cut -c1-12)
+            git clone -q "https://cnb:${CNB_TOKEN}@cnb.cool/org/infra.git" /tmp/infra
+            cd /tmp/infra && sh hack/bump.sh "$IMG" "$TAG" "https://github.com/$SRC_REPO/commit/$SRC_SHA"

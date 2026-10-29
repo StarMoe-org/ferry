@@ -1,0 +1,39 @@
+# Default CNB build pipeline template.
+# Ferry substitutes __BRANCH__ with <branchPrefix><owner>--<repo> before calling /-/build/start.
+__BRANCH__:
+  api_trigger:
+    - docker:
+        image: alpine:3.21
+      services:
+        - docker
+      stages:
+        - name: build and push
+          script: |
+            set -eu
+            TAG=$(printf '%s' "${SOURCE_SHA}" | cut -c1-12)
+            IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}/${IMAGE_NAME}"
+            echo "${CNB_TOKEN}" | docker login "${CNB_DOCKER_REGISTRY}" -u "${CNB_TOKEN_USER_NAME}" --password-stdin
+
+            set --
+            for kv in ${BUILD_ARGS:-}; do
+              set -- "$@" --build-arg "$kv"
+            done
+            docker build "$@" -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" .
+            docker push "${IMAGE}:${TAG}"
+            docker push "${IMAGE}:latest"
+
+        - name: notify ferry
+          script: |
+            set -eu
+            apk add --no-cache curl jq >/dev/null
+            TAG=$(printf '%s' "${SOURCE_SHA}" | cut -c1-12)
+            IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}/${IMAGE_NAME}"
+            PAYLOAD=$(jq -nc \
+              --arg image "${IMAGE}" \
+              --arg tag "${TAG}" \
+              --arg source "github:${SOURCE_REPO}@${TAG}" \
+              '{image:$image, tag:$tag, source:$source}')
+            curl -fsS -X POST "${RELAY_URL%/}/deploy" \
+              -H "Authorization: Bearer ${CNB_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "${PAYLOAD}"

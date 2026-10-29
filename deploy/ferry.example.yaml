@@ -1,0 +1,70 @@
+listen: ":8080"
+annotationPrefix: ferry.star.moe
+workDir: /work
+
+auth:
+  disabled: false
+  sessionKey: "${SESSION_KEY}"
+  oidc:
+    issuer: "https://id.example.com"
+    clientID: "ferry"
+    clientSecret: "${OIDC_CLIENT_SECRET}"
+    publicURL: "https://ferry.example.com"
+    scopes: ["openid", "profile", "email", "groups"]
+    groupsClaim: "groups"
+    allowedGroups: ["ops"]
+    allowedUsers: []
+  # Optional compatibility with CI tokens that have git read access to builder/source repos:
+  gitRead:
+    - url: "https://cnb.cool/org/builder.git"
+      username: "cnb"
+
+state:
+  kubernetes:
+    cluster: ""            # defaults to first inCluster entry, or first cluster
+    namespace: "app"
+    name: "ferry-state"
+
+namespaces:
+  - "app"
+
+clusters:
+  - name: de
+    inCluster: true
+  - name: sg
+    server: "https://k8s-sg.example.com:6443"
+    caFile: "/secrets/clusters/sg.ca"
+    tokenFile: "/secrets/clusters/sg.token"
+
+# Optional ci-relay compatibility: JSON map {"sg": {"server": "...", "ca": "<b64>", "token": "..."}}
+clustersFile: ""
+
+# Optional: CNB mirror + build pipeline trigger
+cnb:
+  repo: "org/builder"
+  token: "${CNB_TOKEN}"
+  imagePrefix: "docker.cnb.cool/org/builder"
+  pipelineFile: "/etc/ferry/pipeline.yml"
+  branchPrefix: "src/"
+  api: "https://api.cnb.cool"
+  git: "https://cnb.cool"
+
+github:
+  token: "${GITHUB_TOKEN}"
+  webhookSecret: "${GITHUB_WEBHOOK_SECRET}"
+
+# Optional: Daily cleaned manifest + SOPS secret snapshot to Git
+snapshot:
+  repo: "https://github.com/org/clusters.git"
+  branch: "main"
+  dir: "snapshots"
+  username: "x-access-token"
+  token: "${SNAPSHOT_GIT_TOKEN}"
+  agePublicKey: "age1example00000000000000000000000000000000000000000000000000"
+  hourUTC: 19
+  author:
+    name: "ferry"
+    email: "ferry@localhost"
+
+# Optional one-time import of ci-relay repos.json when state has no sources yet
+seedSources: ""

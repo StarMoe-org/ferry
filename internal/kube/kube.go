@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -130,6 +131,48 @@ func IsConflict(err error) bool {
 	return errors.As(err, &se) && se.Code == http.StatusConflict
 }
 
+func IsForbidden(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Code == http.StatusForbidden
+}
+
+func IsUnprocessable(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Code == http.StatusUnprocessableEntity
+}
+
+// ServerHost returns the API server host[:port] with scheme and any userinfo stripped.
+func (c *Client) ServerHost() string {
+	u, err := url.Parse(c.server)
+	if err != nil || u.Host == "" {
+		return c.server
+	}
+	return u.Host
+}
+
+// ValidName reports whether s is a valid Kubernetes resource or namespace name
+// (RFC 1123 DNS subdomain: lowercase alphanumeric, '-' or '.', 1..253 chars),
+// safe to interpolate into API URL paths.
+func ValidName(s string) bool {
+	if len(s) == 0 || len(s) > 253 || strings.Contains(s, "..") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		isAlphaNum := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+		if i == 0 || i == len(s)-1 {
+			if !isAlphaNum {
+				return false
+			}
+			continue
+		}
+		if !isAlphaNum && ch != '-' && ch != '.' {
+			return false
+		}
+	}
+	return true
+}
+
 // Do sends body (marshalled unless it is already []byte) and decodes the answer into out, if given.
 func (c *Client) Do(ctx context.Context, method, path string, body any, contentType string, out any) error {
 	var rd io.Reader
@@ -187,6 +230,10 @@ func (c *Client) Do(ctx context.Context, method, path string, body any, contentT
 
 func (c *Client) Get(ctx context.Context, path string, out any) error {
 	return c.Do(ctx, http.MethodGet, path, nil, "", out)
+}
+
+func (c *Client) Patch(ctx context.Context, path, patchType string, body, out any) error {
+	return c.Do(ctx, http.MethodPatch, path, body, patchType, out)
 }
 
 // Version is the API server's git version, for example v1.34.1+k3s1.

@@ -1,0 +1,7 @@
+/ferry
+/bin/
+/web/node_modules/
+/web/dist/*
+!/web/dist/.keep
+*.local
+.DS_Store

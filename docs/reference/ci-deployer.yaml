@@ -1,0 +1,42 @@
+# The identity ci-relay (DE, ci.star.moe) acts as in every cluster: it points workloads in namespace apps
+# at the images CI built (POST /deploy, from hack/bump.sh), and reads that namespace for the nightly
+# snapshot into this repository (snapshots/). Nothing outside apps.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-deployer
+  namespace: kube-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ci-deployer-token
+  namespace: kube-system
+  annotations:
+    kubernetes.io/service-account.name: ci-deployer
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ci-deployer
+  namespace: apps
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [patch]
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-deployer
+  namespace: apps
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: ci-deployer }
+subjects:
+  - { kind: ServiceAccount, name: ci-deployer, namespace: kube-system }

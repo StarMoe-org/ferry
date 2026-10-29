@@ -1,0 +1,26 @@
+"__BRANCH__":
+  api_trigger_build:
+    - name: build
+      services:
+        - docker
+      stages:
+        - name: docker build
+          script: |
+            set -eu
+            IMG="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}/${IMAGE_NAME}"
+            TAG=$(echo "$SRC_SHA" | cut -c1-12)
+            echo "$CNB_TOKEN" | docker login -u "$CNB_TOKEN_USER_NAME" --password-stdin "$CNB_DOCKER_REGISTRY"
+            docker pull -q "$IMG:latest" || true
+            docker build --cache-from "$IMG:latest" --build-arg BUILDKIT_INLINE_CACHE=1 \
+              --label org.opencontainers.image.source="https://github.com/$SRC_REPO" \
+              --label org.opencontainers.image.revision="$SRC_SHA" \
+              $BUILD_ARGS -t "$IMG:$TAG" -t "$IMG:latest" .
+            docker push -q "$IMG:$TAG"
+            docker push -q "$IMG:latest"
+        - name: deploy
+          script: |
+            set -eu
+            IMG="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}/${IMAGE_NAME}"
+            TAG=$(echo "$SRC_SHA" | cut -c1-12)
+            git clone -q "https://cnb:${CNB_TOKEN}@cnb.cool/StarMoe-org/infra.git" /tmp/infra
+            cd /tmp/infra && sh hack/bump.sh "$IMG" "$TAG" "https://github.com/$SRC_REPO/commit/$SRC_SHA"

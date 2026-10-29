@@ -1,0 +1,70 @@
+# GitHub push webhook -> CNB build, POST /deploy (hack/bump.sh) and nightly snapshots of namespace apps
+# (source: cnb.cool/StarMoe-org/ci, relay/). Acts in the clusters as platform/ci-deployer.
+# Moved from TL. GitHub webhooks of the private repos point at https://ci.star.moe/.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ci-relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: ci-relay }
+  template:
+    metadata:
+      labels: { app: ci-relay }
+    spec:
+      imagePullSecrets:
+        - name: cnb-registry
+      containers:
+        - name: relay
+          image: docker.cnb.cool/starmoe-org/ci/relay:fb1d5df0
+          envFrom:
+            - secretRef: { name: ci-relay }
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /, port: http }
+          resources:
+            requests: { cpu: 10m, memory: 48Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/relay }
+            - { name: clusters, mountPath: /etc/relay-clusters, readOnly: true }
+            - { name: work, mountPath: /work }
+      volumes:
+        - name: config
+          configMap: { name: ci-relay }
+        - name: clusters
+          secret: { secretName: ci-relay-clusters }
+        - name: work
+          emptyDir: { sizeLimit: 2Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ci-relay
+spec:
+  selector: { app: ci-relay }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ci-star-moe
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [ci.star.moe]
+      secretName: ci-star-moe-tls
+  rules:
+    - host: ci.star.moe
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: ci-relay, port: { name: http } }

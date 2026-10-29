@@ -34,23 +34,34 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	var eng *ferry.Engine
 	if *demoMode {
-		log.Fatal("demo mode not yet wired")
+		addr := *listenFlag
+		if addr == "" {
+			addr = ":8080"
+		}
+		demo, err := ferry.StartDemo(ctx, addr)
+		if err != nil {
+			log.Fatalf("demo init error: %v", err)
+		}
+		defer demo.Close()
+		eng = demo.Engine
+		log.Printf("ferry %s starting in -demo mode (3 fake clusters: de, sg, jp; auth disabled)", version)
+	} else {
+		cfg, err := ferry.LoadConfig(*configPath)
+		if err != nil {
+			log.Fatalf("config error: %v", err)
+		}
+		if *listenFlag != "" {
+			cfg.Listen = *listenFlag
+		}
+		var initErr error
+		eng, initErr = ferry.NewFromConfig(ctx, cfg)
+		if initErr != nil {
+			log.Fatalf("init error: %v", initErr)
+		}
+		defer eng.Close()
 	}
-
-	cfg, err := ferry.LoadConfig(*configPath)
-	if err != nil {
-		log.Fatalf("config error: %v", err)
-	}
-	if *listenFlag != "" {
-		cfg.Listen = *listenFlag
-	}
-
-	eng, err := ferry.NewFromConfig(ctx, cfg)
-	if err != nil {
-		log.Fatalf("init error: %v", err)
-	}
-	defer eng.Close()
 
 	srvHandler, err := server.New(eng, server.Options{})
 	if err != nil {
@@ -58,7 +69,7 @@ func main() {
 	}
 
 	httpSrv := &http.Server{
-		Addr:              cfg.Listen,
+		Addr:              eng.Config().Listen,
 		Handler:           srvHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -71,7 +82,7 @@ func main() {
 		_ = httpSrv.Shutdown(shutCtx)
 	}()
 
-	log.Printf("ferry %s listening on %s", version, cfg.Listen)
+	log.Printf("ferry %s listening on %s", version, eng.Config().Listen)
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("listen error: %v", err)
 	}

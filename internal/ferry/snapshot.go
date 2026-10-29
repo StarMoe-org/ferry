@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -20,6 +21,8 @@ import (
 	"github.com/StarMoe-org/ferry/internal/state"
 )
 
+const defaultSnapshotTimeout = 10 * time.Minute
+
 var ErrNotConfigured = errors.New("feature is not configured")
 
 // WebhookStatus describes the state of a GitHub push webhook on a source repository.
@@ -30,10 +33,10 @@ type WebhookStatus struct {
 	Message    string `json:"message,omitempty"`
 }
 
-// SnapshotResult is returned by POST /snapshot and POST /api/snapshot.
+// SnapshotResult is returned by synchronous Snapshot calls.
 type SnapshotResult struct {
-	Status string `json:"status"` // "committed" | "unchanged"
-	Commit string `json:"commit"`
+	Status string `json:"status"` // "committed" | "unchanged" | "queued"
+	Commit string `json:"commit,omitempty"`
 }
 
 type snapshotKindSpec struct {
@@ -58,13 +61,11 @@ var snapshotKinds = []snapshotKindSpec{
 
 var skipSecretTypes = map[string]bool{
 	"kubernetes.io/service-account-token": true,
+	"kubernetes.io/tls":                   true,
 	"helm.sh/release.v1":                  true,
 }
 
-var dropAnnotations = map[string]bool{
-	"kubectl.kubernetes.io/last-applied-configuration": true,
-	"deployment.kubernetes.io/revision":                true,
-}
+var dropAnnotationsRe = regexp.MustCompile(`^(kubectl\.kubernetes\.io/last-applied-configuration|argocd\.argoproj\.io/.*|deployment\.kubernetes\.io/revision|pv\.kubernetes\.io/.*|volume\..*)$`)
 
 var dropServiceSpecFields = []string{
 	"clusterIP",
@@ -81,9 +82,10 @@ type inflightSnapshot struct {
 }
 
 type snapshotRunner struct {
-	eng  *Engine
-	mu   sync.Mutex
-	call *inflightSnapshot
+	eng     *Engine
+	timeout time.Duration
+	mu      sync.Mutex
+	call    *inflightSnapshot
 
 	ctx  context.Context
 	stop context.CancelFunc
@@ -93,15 +95,23 @@ type snapshotRunner struct {
 func (e *Engine) initSnapshots() {
 	ctx, cancel := context.WithCancel(context.Background())
 	sr := &snapshotRunner{
-		eng:  e,
-		ctx:  ctx,
-		stop: cancel,
+		eng:     e,
+		timeout: defaultSnapshotTimeout,
+		ctx:     ctx,
+		stop:    cancel,
 	}
 	if strings.TrimSpace(e.cfg.Snapshot.Repo) != "" {
+		hourUTC := e.cfg.Snapshot.EffectiveHourUTC()
 		sr.wg.Add(1)
-		go sr.scheduleLoop()
+		go sr.scheduleLoop(hourUTC)
 	}
 	e.snapRunner = sr
+}
+
+func (s *snapshotRunner) setTimeout(d time.Duration) {
+	s.mu.Lock()
+	s.timeout = d
+	s.mu.Unlock()
 }
 
 func (s *snapshotRunner) Close() {
@@ -118,59 +128,85 @@ func nextDailyUTCRun(now time.Time, hourUTC int) time.Time {
 	return target
 }
 
-func (s *snapshotRunner) scheduleLoop() {
+func (s *snapshotRunner) scheduleLoop(hourUTC int) {
 	defer s.wg.Done()
 	for {
-		wait := time.Until(nextDailyUTCRun(time.Now(), s.eng.cfg.Snapshot.EffectiveHourUTC()))
+		wait := time.Until(nextDailyUTCRun(time.Now(), hourUTC))
 		timer := time.NewTimer(wait)
 		select {
 		case <-s.ctx.Done():
 			timer.Stop()
 			return
 		case <-timer.C:
-			runCtx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
-			_, _ = s.eng.Snapshot(runCtx, "schedule")
-			cancel()
+			call := s.startOrJoin("schedule")
+			select {
+			case <-call.done:
+			case <-s.ctx.Done():
+				return
+			}
 		}
 	}
 }
 
+// QueueSnapshot triggers a single-flight snapshot in the background and returns immediately.
+// The snapshot runs with a context.Background() + timeout decoupled from any HTTP request.
+func (e *Engine) QueueSnapshot(actor string) error {
+	if strings.TrimSpace(e.cfg.Snapshot.Repo) == "" {
+		return ErrNotConfigured
+	}
+	e.snapRunner.startOrJoin(actor)
+	return nil
+}
+
 // Snapshot exports cluster manifests and SOPS-encrypted secrets to the configured git repository.
-// Concurrent requests join the single in-flight snapshot run.
+// Concurrent requests join the single in-flight snapshot run, whose execution context is decoupled
+// from individual caller contexts using context.Background() with a timeout.
 func (e *Engine) Snapshot(ctx context.Context, actor string) (SnapshotResult, error) {
 	if strings.TrimSpace(e.cfg.Snapshot.Repo) == "" {
 		return SnapshotResult{}, ErrNotConfigured
 	}
-	return e.snapRunner.do(ctx, actor)
+	call := e.snapRunner.startOrJoin(actor)
+	select {
+	case <-call.done:
+		return call.res, call.err
+	case <-ctx.Done():
+		return SnapshotResult{}, ctx.Err()
+	}
 }
 
-func (s *snapshotRunner) do(ctx context.Context, actor string) (SnapshotResult, error) {
+func (s *snapshotRunner) startOrJoin(actor string) *inflightSnapshot {
 	s.mu.Lock()
 	if s.call != nil {
 		call := s.call
 		s.mu.Unlock()
-		select {
-		case <-call.done:
-			return call.res, call.err
-		case <-ctx.Done():
-			return SnapshotResult{}, ctx.Err()
-		}
+		return call
 	}
 	call := &inflightSnapshot{done: make(chan struct{})}
 	s.call = call
+	timeout := s.timeout
+	if timeout <= 0 {
+		timeout = defaultSnapshotTimeout
+	}
+	s.wg.Add(1)
 	s.mu.Unlock()
 
-	res, err := s.eng.runSnapshotOnce(ctx, actor)
+	go func() {
+		defer s.wg.Done()
+		runCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
 
-	call.res = res
-	call.err = err
-	close(call.done)
+		res, err := s.eng.runSnapshotOnce(runCtx, actor)
 
-	s.mu.Lock()
-	s.call = nil
-	s.mu.Unlock()
+		call.res = res
+		call.err = err
 
-	return res, err
+		s.mu.Lock()
+		s.call = nil
+		close(call.done)
+		s.mu.Unlock()
+	}()
+
+	return call
 }
 
 func (e *Engine) runSnapshotOnce(ctx context.Context, actor string) (SnapshotResult, error) {
@@ -223,7 +259,7 @@ func (e *Engine) executeSnapshot(ctx context.Context) (SnapshotResult, error) {
 			return SnapshotResult{}, mkErr
 		}
 		if _, err2 := runGit(ctx, e.cfg.WorkDir, authHdr, "clone", "-q", "--depth=1", sc.Repo, work); err2 != nil {
-			return SnapshotResult{}, fmt.Errorf("git clone snapshot repo: %w", err)
+			return SnapshotResult{}, fmt.Errorf("git clone snapshot repo: %w", err2)
 		}
 		if _, err3 := runGit(ctx, work, "", "checkout", "-q", "-B", sc.Branch); err3 != nil {
 			return SnapshotResult{}, fmt.Errorf("git checkout %s: %w", sc.Branch, err3)
@@ -301,7 +337,12 @@ func (e *Engine) executeSnapshot(ctx context.Context) (SnapshotResult, error) {
 
 			encPath := filepath.Join(cdir, ns+".secrets.enc.yaml")
 			shaPath := filepath.Join(cdir, ns+".secrets.sha256")
-			if len(secDocs) > 0 && strings.TrimSpace(sc.AgePublicKey) != "" {
+			if len(secDocs) > 0 {
+				if !sc.EffectiveSOPS() {
+					_ = os.Remove(encPath)
+					_ = os.Remove(shaPath)
+					return SnapshotResult{}, fmt.Errorf("cluster %s namespace %s has %d secret(s) but snapshot.sops is disabled", cl.Name, ns, len(secDocs))
+				}
 				plain := strings.Join(secDocs, "---\n")
 				sum := sha256.Sum256([]byte(plain))
 				digest := hex.EncodeToString(sum[:])
@@ -313,14 +354,15 @@ func (e *Engine) executeSnapshot(ctx context.Context) (SnapshotResult, error) {
 					}
 				}
 				if !alreadyMatches {
-					if err := encryptSecretsFile(ctx, encPath, plain, sc.AgePublicKey); err != nil {
+					if err := encryptSecretsFile(ctx, work, encPath, plain, sc.AgePublicKey); err != nil {
+						_ = os.Remove(shaPath)
 						return SnapshotResult{}, err
 					}
 					if err := os.WriteFile(shaPath, []byte(digest+"\n"), 0o644); err != nil {
 						return SnapshotResult{}, err
 					}
 				}
-			} else if len(secDocs) == 0 {
+			} else {
 				_ = os.Remove(encPath)
 				_ = os.Remove(shaPath)
 			}
@@ -422,7 +464,7 @@ func CleanResource(item map[string]any, defaultAPIVersion, defaultKind string) m
 	if anns, ok := meta["annotations"].(map[string]any); ok && len(anns) > 0 {
 		cpAnns := make(map[string]any)
 		for k, v := range anns {
-			if !dropAnnotations[k] {
+			if !dropAnnotationsRe.MatchString(k) {
 				cpAnns[k] = v
 			}
 		}
@@ -451,16 +493,28 @@ func CleanResource(item map[string]any, defaultAPIVersion, defaultKind string) m
 	return out
 }
 
-func encryptSecretsFile(ctx context.Context, encPath, plain, ageRecipient string) error {
+func encryptSecretsFile(ctx context.Context, repoDir, encPath, plain, ageRecipient string) error {
 	if err := os.WriteFile(encPath, []byte(plain), 0o600); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "sops",
-		"--encrypt",
-		"--age", ageRecipient,
-		"--encrypted-regex", "^(data|stringData)$",
-		"--in-place", encPath,
-	)
+	targetArg := encPath
+	if rel, err := filepath.Rel(repoDir, encPath); err == nil && !strings.HasPrefix(rel, "..") {
+		targetArg = rel
+	}
+
+	var args []string
+	if recipient := strings.TrimSpace(ageRecipient); recipient != "" {
+		args = []string{
+			"--age", recipient,
+			"--encrypted-regex", "^(data|stringData)$",
+			"-e", "-i", targetArg,
+		}
+	} else {
+		args = []string{"-e", "-i", targetArg}
+	}
+
+	cmd := exec.CommandContext(ctx, "sops", args...)
+	cmd.Dir = repoDir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		// Never leave unencrypted secret material on disk if sops fails or is missing.

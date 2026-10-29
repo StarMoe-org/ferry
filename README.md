@@ -131,7 +131,7 @@ Ferry is a drop-in replacement for `ci-relay` with zero changes required on exte
 
 - **`POST /deploy`** — Accepts `{"image", "tag", "source"}` with `Authorization: Bearer <token>` (both `fy_...` deploy tokens and `auth.gitRead` repository tokens).
 - **`POST /`** — Remains a full alias for `POST /webhook/github` (`X-Hub-Signature-256` HMAC verification), while `GET /` serves the web UI.
-- **`POST /snapshot`** — Triggers an immediate snapshot and returns `{"status": "committed"|"unchanged", "commit": "<sha>"}`. Legacy single-namespace `secrets.enc.yaml` / `secrets.sha256` files are automatically migrated to `<namespace>.secrets.enc.yaml` / `<namespace>.secrets.sha256`.
+- **`POST /snapshot`** — Immediately returns HTTP `202` (`snapshot queued`) and runs a single-flight snapshot in the background (`sops -e -i` using the repository's `.sops.yaml`, or an optional `agePublicKey` override). Legacy single-namespace `secrets.enc.yaml` / `secrets.sha256` files are automatically migrated to `<namespace>.secrets.enc.yaml` / `<namespace>.secrets.sha256`.
 - **`clustersFile` & `seedSources`** — Point `clustersFile` at an existing `CLUSTERS_FILE` JSON secret and `seedSources` at `repos.json` for automatic first-boot import.
 
 ---

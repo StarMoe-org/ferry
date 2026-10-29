@@ -3,9 +3,6 @@ package ferry
 import (
 	"context"
 	"errors"
-	"net/http"
-
-	"github.com/StarMoe-org/ferry/internal/state"
 )
 
 var ErrNotConfigured = errors.New("feature is not configured")
@@ -22,28 +19,6 @@ type WebhookStatus struct {
 type SnapshotResult struct {
 	Status string `json:"status"` // "committed" | "unchanged"
 	Commit string `json:"commit"`
-}
-
-type buildManager struct{}
-
-func (b *buildManager) Close() {}
-
-func (e *Engine) initBuilder() {}
-
-func (e *Engine) HandleGitHubWebhook(_ context.Context, _, _ string, _ []byte) (int, string) {
-	return http.StatusUnauthorized, "bad signature"
-}
-
-func (e *Engine) TriggerBuild(_ context.Context, _, _ string) (state.Event, error) {
-	return state.Event{}, ErrNotConfigured
-}
-
-func (e *Engine) GetWebhookStatus(_ context.Context, _ string) (WebhookStatus, error) {
-	return WebhookStatus{Status: "unconfigured"}, nil
-}
-
-func (e *Engine) SetupWebhook(_ context.Context, _, _ string) (WebhookStatus, error) {
-	return WebhookStatus{}, ErrNotConfigured
 }
 
 type snapshotRunner struct{}

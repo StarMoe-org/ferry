@@ -405,4 +405,13 @@ func TestOIDC_ES256_Groups_CSRF_CIAuth_Deploy_And_SPA(t *testing.T) {
 		t.Fatalf("expected 404 for missing hashed asset, got %d", missingAsset.StatusCode)
 	}
 	missingAsset.Body.Close()
+
+	// 8. Legacy POST / webhook alias compatibility (Compatibility #2):
+	// GET / serves SPA HTML, while POST / routes to GitHub webhook handler!
+	postRoot, _ := http.Post(ts.URL+"/", "application/json", strings.NewReader(`{}`))
+	postRootBody, _ := io.ReadAll(postRoot.Body)
+	postRoot.Body.Close()
+	if postRoot.StatusCode != http.StatusUnauthorized || strings.TrimSpace(string(postRootBody)) != "bad signature" {
+		t.Fatalf("POST / = %d %q, want 401 bad signature", postRoot.StatusCode, string(postRootBody))
+	}
 }

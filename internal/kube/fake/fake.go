@@ -334,6 +334,10 @@ func parseResourcePath(p string) (groupVer, ns, plural, name string, ok bool) {
 		}
 		return "", "", "", "", false
 	}
+	// /apis/{group}/{ver}/{plural}: every namespace
+	if len(parts) == 4 && parts[0] == "apis" {
+		return "apis/" + parts[1] + "/" + parts[2], "", parts[3], "", true
+	}
 	return "", "", "", "", false
 }
 
@@ -341,7 +345,7 @@ func (s *Server) handleList(w http.ResponseWriter, rm resourceMeta, ns string) {
 	s.mu.Lock()
 	var items []map[string]any
 	for k, obj := range s.objects {
-		if k.plural == rm.plural && k.namespace == ns {
+		if k.plural == rm.plural && (ns == "" || k.namespace == ns) {
 			items = append(items, deepCopyMap(obj))
 		}
 	}

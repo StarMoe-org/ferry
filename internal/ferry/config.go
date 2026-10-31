@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 	"sort"
@@ -41,7 +42,21 @@ type Config struct {
 	CNB              CNBConfig      `json:"cnb"`
 	GitHub           GitHubConfig   `json:"github"`
 	Snapshot         SnapshotConfig `json:"snapshot"`
+	DNS              DNSConfig      `json:"dns"`
 	SeedSources      string         `json:"seedSources"`
+}
+
+// DNSConfig turns on DNS sync: Ingress hosts under Zone get an A record at their cluster's address.
+type DNSConfig struct {
+	Zone    string            `json:"zone"`
+	Targets map[string]string `json:"targets"` // cluster name -> public IPv4
+	TTL     int               `json:"ttl"`
+	Gcore   GcoreConfig       `json:"gcore"`
+}
+
+type GcoreConfig struct {
+	API   string `json:"api"`
+	Token string `json:"token"`
 }
 
 type AuthConfig struct {
@@ -221,6 +236,12 @@ func (c *Config) ApplyDefaults() {
 	if c.Auth.SessionHours == 0 {
 		c.Auth.SessionHours = 12
 	}
+	if c.DNS.TTL == 0 {
+		c.DNS.TTL = 120
+	}
+	if c.DNS.Gcore.API == "" {
+		c.DNS.Gcore.API = "https://api.gcore.com"
+	}
 	if len(c.Auth.OIDC.Scopes) == 0 {
 		c.Auth.OIDC.Scopes = []string{"openid", "profile", "groups"}
 	}
@@ -320,6 +341,20 @@ func (c *Config) Validate() error {
 		}
 		if len(o.AllowedGroups) == 0 && len(o.AllowedUsers) == 0 {
 			return errors.New("config: auth.oidc requires at least one entry in allowedGroups or allowedUsers")
+		}
+	}
+
+	if c.DNS.Zone != "" {
+		if c.DNS.Gcore.Token == "" || len(c.DNS.Targets) == 0 {
+			return errors.New("config: dns requires gcore.token and targets when dns.zone is set")
+		}
+		for name, ip := range c.DNS.Targets {
+			if !seenClusters[name] {
+				return fmt.Errorf("config: dns.targets names unknown cluster %q", name)
+			}
+			if parsed := net.ParseIP(ip); parsed == nil || parsed.To4() == nil {
+				return fmt.Errorf("config: dns.targets[%s] is not an IPv4 address", name)
+			}
 		}
 	}
 

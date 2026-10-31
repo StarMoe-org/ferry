@@ -347,6 +347,20 @@ Port `snapshot()` from `docs/reference/relay.py`. Every day at `hourUTC`, and on
   Message `committed` or `unchanged`.
 - One snapshot at a time. An extra request while one is running joins it.
 
+### DNS
+
+With `dns.zone` set, Ferry keeps one DNS zone in step with the clusters. Every 30 seconds it lists
+Ingresses in every namespace of every cluster and gives each host under the zone an A record at
+`dns.targets[<cluster>]`, so adding a domain in the dashboard is all it takes. A host gone from every
+cluster loses its record.
+
+- Deletes need a full view: if any cluster can't be read, the pass adds and moves records but deletes
+  nothing.
+- Only A records pointing at `dns.targets` are deleted. The zone's own records, wildcards and records
+  pointing elsewhere are treated as hand-made and left alone.
+- A host on two clusters is reported and its record left as it is.
+- Gcore is the only provider. Reading Ingresses everywhere needs its own `ClusterRole` (see RBAC).
+
 ## HTTP API
 
 The SPA is served from `/` with a history-API fallback to `index.html`, for any GET that is not
@@ -446,7 +460,8 @@ In each cluster, Ferry acts as a ServiceAccount with a Role in each configured n
 - `get` and `list` on everything;
 - `patch` on `deployments`, `statefulsets`, `daemonsets` and `cronjobs`.
 
-There is no `watch`, `create`, `delete` or pod access. Every feature must work inside that. For
+There is no `watch`, `create`, `delete` or pod access. Every feature must work inside that. With
+`dns.zone` set, a ClusterRole also grants `get` and `list` on `ingresses` in every namespace. For
 the ConfigMap state store, Ferry's own namespace on its home cluster also needs `get`, `create`
 and `update` on `configmaps`; put that in `deploy/`.
 

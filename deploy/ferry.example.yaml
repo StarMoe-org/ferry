@@ -20,6 +20,13 @@ auth:
     - url: "https://cnb.cool/org/builder.git"
       username: "cnb"
 
+# Ingress hosts under dns.zone get an A record at their cluster's address.
+# dns:
+#   zone: dev.example.com
+#   targets: { de: 203.0.113.10 }   # cluster name -> public IPv4
+#   ttl: 120
+#   gcore: { token: "${GCORE_API_TOKEN}" }
+
 state:
   kubernetes:
     cluster: ""            # defaults to first inCluster entry, or first cluster

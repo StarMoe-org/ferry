@@ -52,6 +52,7 @@ type Engine struct {
 	// Optional hooks wired in later stages (builder, snapshots).
 	buildQueue *buildManager
 	snapRunner *snapshotRunner
+	dnsSync    *dnsSyncer
 }
 
 // New constructs an Engine from pre-built Kubernetes clients and state store.
@@ -77,6 +78,7 @@ func newEngineWithPolling(cfg *Config, clients []*kube.Client, store *state.Stor
 	}
 	e.initBuilder(pollEvery, pollFor)
 	e.initSnapshots()
+	e.initDNS(dnsSyncEvery)
 	return e, nil
 }
 
@@ -156,6 +158,9 @@ func (e *Engine) InvalidateInventory() {
 
 // Close stops background workers cleanly.
 func (e *Engine) Close() {
+	if e.dnsSync != nil {
+		e.dnsSync.Close()
+	}
 	if e.buildQueue != nil {
 		e.buildQueue.Close()
 	}

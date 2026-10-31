@@ -357,6 +357,7 @@ func (e *Engine) scrubSecrets(s string) string {
 		e.cfg.CNB.Token,
 		e.cfg.GitHub.WebhookSecret,
 		e.cfg.Snapshot.Token,
+		e.cfg.DNS.Gcore.Token,
 		e.cfg.Auth.OIDC.ClientSecret,
 		e.cfg.Auth.SessionKey,
 	}

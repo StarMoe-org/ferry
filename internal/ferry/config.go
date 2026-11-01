@@ -46,12 +46,44 @@ type Config struct {
 	SeedSources      string         `json:"seedSources"`
 }
 
-// DNSConfig turns on DNS sync: Ingress hosts under Zone get an A record at their cluster's address.
+// DNSConfig turns on DNS sync: Ingress hosts under Zone get an A record at their cluster's address,
+// or with CDN enabled a CNAME to Gcore's CDN.
 type DNSConfig struct {
 	Zone    string            `json:"zone"`
 	Targets map[string]string `json:"targets"` // cluster name -> public IPv4
 	TTL     int               `json:"ttl"`
 	Gcore   GcoreConfig       `json:"gcore"`
+	CDN     CDNConfig         `json:"cdn"`
+}
+
+// CDNConfig puts the zone's hosts behind a pool of Gcore CDN resources, so DNS shows the CDN and not
+// the clusters.
+type CDNConfig struct {
+	Enabled   bool   `json:"enabled"`
+	Prefix    string `json:"prefix"`    // resources named <prefix>-<cluster>-<n> are Ferry's
+	MinFree   int    `json:"minFree"`   // hostname slots each cluster keeps open
+	ACMEEmail string `json:"acmeEmail"` // contact on the Let's Encrypt account
+}
+
+var dnsLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+func (d DNSConfig) validateCDN() error {
+	if d.Zone == "" {
+		return errors.New("config: dns.cdn requires dns.zone")
+	}
+	if !strings.Contains(d.CDN.ACMEEmail, "@") {
+		return errors.New("config: dns.cdn requires acmeEmail")
+	}
+	if d.CDN.MinFree < 1 || d.CDN.MinFree > cdnSlotsPerResource {
+		return fmt.Errorf("config: dns.cdn.minFree must be between 1 and %d", cdnSlotsPerResource)
+	}
+	// Resource names double as hostnames under the zone, so they have to be DNS labels.
+	for cluster := range d.Targets {
+		if name := poolName(d.CDN.Prefix, cluster, 100); !dnsLabelPattern.MatchString(name) {
+			return fmt.Errorf("config: dns.cdn: %q is not a usable resource name", name)
+		}
+	}
+	return nil
 }
 
 type GcoreConfig struct {
@@ -242,6 +274,12 @@ func (c *Config) ApplyDefaults() {
 	if c.DNS.Gcore.API == "" {
 		c.DNS.Gcore.API = "https://api.gcore.com"
 	}
+	if c.DNS.CDN.Prefix == "" {
+		c.DNS.CDN.Prefix = "ferry-pool"
+	}
+	if c.DNS.CDN.MinFree == 0 {
+		c.DNS.CDN.MinFree = 2
+	}
 	if len(c.Auth.OIDC.Scopes) == 0 {
 		c.Auth.OIDC.Scopes = []string{"openid", "profile", "groups"}
 	}
@@ -355,6 +393,11 @@ func (c *Config) Validate() error {
 			if parsed := net.ParseIP(ip); parsed == nil || parsed.To4() == nil {
 				return fmt.Errorf("config: dns.targets[%s] is not an IPv4 address", name)
 			}
+		}
+	}
+	if c.DNS.CDN.Enabled {
+		if err := c.DNS.validateCDN(); err != nil {
+			return err
 		}
 	}
 

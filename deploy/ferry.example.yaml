@@ -26,6 +26,13 @@ auth:
 #   targets: { de: 203.0.113.10 }   # cluster name -> public IPv4
 #   ttl: 120
 #   gcore: { token: "${GCORE_API_TOKEN}" }
+#   # Hide the origins: hosts get a CNAME to Gcore's CDN instead of an A record. The token needs
+#   # write access to CDN as well as DNS. See "CDN pool" in docs/DESIGN.md.
+#   cdn:
+#     enabled: true
+#     acmeEmail: ops@example.com   # Let's Encrypt contact, for the certificate on *.<zone>
+#     prefix: ferry-pool           # resources named <prefix>-<cluster>-<n> are Ferry's (default)
+#     minFree: 2                   # hostname slots each cluster keeps open, 1-10 (default)
 
 state:
   kubernetes:

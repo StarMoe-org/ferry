@@ -19,11 +19,13 @@ import (
 const dnsSyncEvery = 30 * time.Second
 
 // dnsSyncer gives every Ingress host under dns.zone an A record at the public address of the cluster
-// it runs in, and removes the record when the host is gone from every cluster. People add domains in
-// the dashboard; nothing there has to know about the DNS provider.
+// it runs in, and removes the record when the host is gone from every cluster. With dns.cdn on, hosts
+// go behind the CDN pool instead (see cdnpool.go). People add domains in the dashboard; nothing there
+// has to know about the DNS provider.
 type dnsSyncer struct {
 	eng   *Engine
 	gcore *gcoreDNS
+	cdn   *cdnPool // nil: plain A records
 
 	ctx  context.Context
 	stop context.CancelFunc
@@ -44,6 +46,9 @@ func (e *Engine) initDNS(every time.Duration) {
 		ctx:      ctx,
 		stop:     cancel,
 		problems: map[string]string{},
+	}
+	if e.cfg.DNS.CDN.Enabled {
+		d.cdn = newCDNPool(e.cfg.DNS, d.gcore, legoIssuer{email: e.cfg.DNS.CDN.ACMEEmail, token: e.cfg.DNS.Gcore.Token})
 	}
 	e.dnsSync = d
 	d.wg.Add(1)
@@ -80,12 +85,18 @@ func (d *dnsSyncer) sync(ctx context.Context) {
 	cfg := d.eng.cfg.DNS
 	problems := map[string]string{}
 	want, complete := d.ingressHosts(ctx, problems)
-	current, err := d.gcore.records(ctx)
+	zone, err := d.gcore.records(ctx)
 	if err != nil {
 		problems["gcore"] = "list records: " + err.Error()
 		d.report(problems)
 		return
 	}
+	if d.cdn != nil {
+		d.syncCDN(ctx, want, complete, zone, problems)
+		d.report(problems)
+		return
+	}
+	current := zone["A"]
 
 	hosts := make([]string, 0, len(want))
 	for host := range want {
@@ -107,7 +118,7 @@ func (d *dnsSyncer) sync(ctx context.Context) {
 		if exists && len(got) == 1 && got[0] == ip {
 			continue
 		}
-		if err := d.gcore.set(ctx, host, ip, exists); err != nil {
+		if err := d.gcore.set(ctx, "A", host, ip, exists); err != nil {
 			problems[host] = fmt.Sprintf("set %s: %v", host, err)
 			continue
 		}
@@ -126,7 +137,7 @@ func (d *dnsSyncer) sync(ctx context.Context) {
 		if _, wanted := want[name]; wanted || !removable(name, cfg.Zone, ips, ours) {
 			continue
 		}
-		if err := d.gcore.remove(ctx, name); err != nil {
+		if err := d.gcore.remove(ctx, "A", name); err != nil {
 			problems[name] = fmt.Sprintf("remove %s: %v", name, err)
 			continue
 		}
@@ -201,7 +212,7 @@ func (d *dnsSyncer) report(problems map[string]string) {
 	d.problems = problems
 }
 
-// gcoreDNS is the part of Gcore's DNS API Ferry uses: static A records in one zone.
+// gcoreDNS is the part of Gcore's DNS API Ferry uses: static records in one zone.
 type gcoreDNS struct {
 	api   string
 	zone  string
@@ -250,10 +261,10 @@ func (g *gcoreDNS) do(ctx context.Context, method, path string, body, out any) e
 	return json.Unmarshal(data, out)
 }
 
-// records returns the zone's A records: name to addresses.
-func (g *gcoreDNS) records(ctx context.Context) (map[string][]string, error) {
+// records returns the zone's records: type, then name, to contents.
+func (g *gcoreDNS) records(ctx context.Context) (map[string]map[string][]string, error) {
 	const page = 100
-	out := map[string][]string{}
+	out := map[string]map[string][]string{}
 	for offset := 0; ; offset += page {
 		var resp struct {
 			RRSets []struct {
@@ -270,18 +281,18 @@ func (g *gcoreDNS) records(ctx context.Context) (map[string][]string, error) {
 			return nil, err
 		}
 		for _, rr := range resp.RRSets {
-			if rr.Type != "A" {
-				continue
-			}
-			var ips []string
+			var values []string
 			for _, rec := range rr.ResourceRecords {
 				for _, c := range rec.Content {
-					if ip, ok := c.(string); ok {
-						ips = append(ips, ip)
+					if value, ok := c.(string); ok {
+						values = append(values, value)
 					}
 				}
 			}
-			out[strings.ToLower(rr.Name)] = ips
+			if out[rr.Type] == nil {
+				out[rr.Type] = map[string][]string{}
+			}
+			out[rr.Type][strings.ToLower(rr.Name)] = values
 		}
 		if len(resp.RRSets) == 0 || offset+page >= resp.TotalAmount {
 			return out, nil
@@ -289,21 +300,21 @@ func (g *gcoreDNS) records(ctx context.Context) (map[string][]string, error) {
 	}
 }
 
-func (g *gcoreDNS) rrsetPath(name string) string {
-	return "/dns/v2/zones/" + url.PathEscape(g.zone) + "/" + url.PathEscape(name) + "/A"
+func (g *gcoreDNS) rrsetPath(typ, name string) string {
+	return "/dns/v2/zones/" + url.PathEscape(g.zone) + "/" + url.PathEscape(name) + "/" + typ
 }
 
-func (g *gcoreDNS) set(ctx context.Context, name, ip string, exists bool) error {
+func (g *gcoreDNS) set(ctx context.Context, typ, name, content string, exists bool) error {
 	method := http.MethodPost
 	if exists {
 		method = http.MethodPut
 	}
-	return g.do(ctx, method, g.rrsetPath(name), map[string]any{
+	return g.do(ctx, method, g.rrsetPath(typ, name), map[string]any{
 		"ttl":              g.ttl,
-		"resource_records": []any{map[string]any{"content": []string{ip}, "enabled": true}},
+		"resource_records": []any{map[string]any{"content": []string{content}, "enabled": true}},
 	}, nil)
 }
 
-func (g *gcoreDNS) remove(ctx context.Context, name string) error {
-	return g.do(ctx, http.MethodDelete, g.rrsetPath(name), nil, nil)
+func (g *gcoreDNS) remove(ctx context.Context, typ, name string) error {
+	return g.do(ctx, http.MethodDelete, g.rrsetPath(typ, name), nil, nil)
 }

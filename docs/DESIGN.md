@@ -361,6 +361,50 @@ cluster loses its record.
 - A host on two clusters is reported and its record left as it is.
 - Gcore is the only provider. Reading Ingresses everywhere needs its own `ClusterRole` (see RBAC).
 
+#### CDN pool
+
+With `dns.cdn.enabled`, DNS shows Gcore's CDN instead of the clusters: each host becomes a secondary
+hostname on a CDN resource and gets a CNAME to the account's CDN address (`cname` in
+`GET /cdn/clients/me`). The Gcore token needs write access to both DNS and CDN.
+
+A new resource takes about 17 minutes to reach the origin, and returns `503 Default Vhost` until then.
+A hostname added to a live resource works within 30 seconds, but a resource holds only ten. So Ferry
+keeps a pool, and the slow step happens ahead of need:
+
+- Resources named `<prefix>-<cluster>-<n>` belong to the pool, with `<name>.<zone>` as a placeholder
+  primary hostname and `dns.targets[<cluster>]` as origin. Gcore is the only record of them. Ferry
+  changes no other resource, and deletes none at all.
+- When a cluster has fewer than `minFree` open slots, the next resource is created. Slots on a resource
+  that's still warming count, so one shortfall makes one resource.
+- A host only goes on a resource at least 20 minutes old. Until there is one the host waits and is
+  reported, and an existing A record stays, so turning this on takes nothing down. The wait goes by
+  `created`: the `processed` status isn't what was measured.
+- The order for a new host is hostname, then CNAME. An old A record with the same name is deleted just
+  before the CNAME, since Gcore refuses both at once.
+- A host that changes cluster leaves its old resource once the new one has room, and not before.
+- Deletes keep the rule above: full view only. A CNAME is deleted only if it points at the CDN address
+  and no resource outside the pool holds the name, because every resource on the account shares that
+  address. Other CNAMEs are hand-made. A host that already has one, or that sits on a resource outside
+  the pool, is reported and left alone.
+- `*.<zone>` covers one label, so a host deeper than that is reported and left alone. Its origin stays
+  in DNS if it has an A record.
+- A resource Gcore suspended (it does this after 90 days without traffic) takes no hosts and counts for
+  no slots. Hosts on it move off, it is reported, and the pool grows to replace it. Ferry doesn't
+  reactivate it.
+- Changing `dns.targets` doesn't update the origin of existing resources.
+
+The wildcard certificate is issued by Let's Encrypt over DNS-01 through lego, under a new account each
+time, and stored on Gcore as `<prefix>-<zone>`, shared by the whole pool. Each pass reads its
+`validity_not_after`: with none on Gcore it is issued and uploaded, and with under 30 days left it is
+renewed and replaced in place with `PUT`, which reaches every resource within about 20 seconds. Nothing
+is created or attached until the certificate is there. A failed order isn't retried for an hour, as
+Let's Encrypt limits failed orders and new accounts, and a signed certificate waiting on an upload is
+held in memory, as it limits duplicates too. Orders run inside the pass, so a slow one holds up DNS sync
+for up to 10 minutes.
+
+`dns.cdn.enabled: false`, the default, leaves everything above out. Turning it off later undoes
+nothing: Gcore refuses an A record beside a CNAME, so the CNAMEs need clearing by hand first.
+
 ## HTTP API
 
 The SPA is served from `/` with a history-API fallback to `index.html`, for any GET that is not

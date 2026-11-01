@@ -40,6 +40,7 @@ Press `/` on the Home screen to focus the deploy composer, paste `docker.cnb.coo
 - **Sources & Builds** — Map `owner/repo@branch` to either **CNB** (shallow git mirror via `http.extraHeader` + `/-/build/start`) or **External CI** (GitHub Actions, GitLab CI, etc.). Build events automatically link to subsequent `/deploy` calls by commit tag.
 - **OIDC & Scoped CI Auth** — Browser users sign in via OIDC Authorization Code + PKCE (`ES256`/`RS256` JWKS, Pocket ID / Dex / Keycloak / GitHub Enterprise OIDC) gated by `allowedGroups` or `allowedUsers`. CI pipelines authenticate with SHA-256-hashed `fy_...` deploy tokens or `gitRead` repository tokens.
 - **Cluster Snapshots** — Periodically exports cleaned workload/network manifests and SOPS (`age`)-encrypted Secrets to a Git repository, re-encrypting Secrets only when their plaintext SHA-256 changes.
+- **DNS Sync** — Ingress hosts under `dns.zone` get an A record at their cluster's address, or with `dns.cdn` on, a CNAME to a pool of Gcore CDN resources that keeps origin addresses out of DNS. Ferry also issues and renews the pool's wildcard certificate.
 
 ---
 

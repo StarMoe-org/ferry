@@ -45,6 +45,11 @@ type Engine struct {
 	byCluster map[string]*kube.Client
 	store     *state.Store
 
+	// clusterTimeout caps each cluster's share of a pass over all of them (see isolation.go);
+	// snapshotClusterTimeout does the same for one cluster's part of a snapshot.
+	clusterTimeout         time.Duration
+	snapshotClusterTimeout time.Duration
+
 	invMu sync.Mutex
 	invAt time.Time
 	inv   *Inventory
@@ -75,6 +80,9 @@ func newEngineWithPolling(cfg *Config, clients []*kube.Client, store *state.Stor
 		clusters:  clients,
 		byCluster: byName,
 		store:     store,
+
+		clusterTimeout:         defaultClusterTimeout,
+		snapshotClusterTimeout: snapshotClusterTimeout,
 	}
 	e.initBuilder(pollEvery, pollFor)
 	e.initSnapshots()
@@ -349,96 +357,46 @@ func (e *Engine) Deploy(ctx context.Context, actor, image, tag, source string, d
 		wg.Add(1)
 		go func(ci int, cl *kube.Client) {
 			defer wg.Done()
+			// Each cluster gets its own deadline and lists everything at once: a cluster that is
+			// down fails on its own, and the others' results and the HTTP answer don't wait for it.
+			cctx, cancel := e.clusterContext(ctx)
+			defer cancel()
+			targets, paths := workloadTargets(e.cfg.Namespaces)
+			lists := listAll(cctx, cl, paths)
+
 			var local []state.Result
-			for _, ns := range e.cfg.Namespaces {
-				for _, wk := range workloadKinds {
-					var listResp struct {
-						Items []map[string]any `json:"items"`
-					}
-					if err := cl.Get(ctx, wk.listPath(ns), &listResp); err != nil {
-						local = append(local, state.Result{
-							Cluster:   cl.Name,
-							Namespace: ns,
-							Kind:      wk.Kind,
-							To:        want,
-							Result:    "error",
-							Error:     err.Error(),
-						})
+			for ti, t := range targets {
+				ns, wk := t.ns, t.wk
+				if err := lists[ti].err; err != nil {
+					local = append(local, state.Result{
+						Cluster:   cl.Name,
+						Namespace: ns,
+						Kind:      wk.Kind,
+						To:        want,
+						Result:    "error",
+						Error:     e.clusterError(cctx, ctx, cl, err).Error(),
+					})
+					continue
+				}
+				for _, item := range lists[ti].items {
+					meta, _ := item["metadata"].(map[string]any)
+					wname, _ := meta["name"].(string)
+					if !kube.ValidName(wname) {
 						continue
 					}
-					for _, item := range listResp.Items {
-						meta, _ := item["metadata"].(map[string]any)
-						wname, _ := meta["name"].(string)
-						if !kube.ValidName(wname) {
+					ann, hasAnnMap := extractAnnotations(item)
+					_, isArgo := ann[argoTrackingAnnotation]
+					isPaused := ann[autoKey] == "false"
+
+					containers := extractContainers(item, wk.PodSpecPtr)
+					var toPatch []containerLoc
+					for _, c := range containers {
+						if !Runs(c.image, image) {
 							continue
 						}
-						ann, hasAnnMap := extractAnnotations(item)
-						_, isArgo := ann[argoTrackingAnnotation]
-						isPaused := ann[autoKey] == "false"
-
-						containers := extractContainers(item, wk.PodSpecPtr)
-						var toPatch []containerLoc
-						for _, c := range containers {
-							if !Runs(c.image, image) {
-								continue
-							}
-							switch {
-							case c.image == want:
-								local = append(local, state.Result{
-									Cluster:   cl.Name,
-									Namespace: ns,
-									Kind:      wk.Kind,
-									Name:      wname,
-									Container: c.name,
-									From:      c.image,
-									To:        want,
-									Result:    "current",
-								})
-							case isArgo:
-								local = append(local, state.Result{
-									Cluster:   cl.Name,
-									Namespace: ns,
-									Kind:      wk.Kind,
-									Name:      wname,
-									Container: c.name,
-									From:      c.image,
-									To:        want,
-									Result:    "argo-cd",
-								})
-							case isPaused:
-								local = append(local, state.Result{
-									Cluster:   cl.Name,
-									Namespace: ns,
-									Kind:      wk.Kind,
-									Name:      wname,
-									Container: c.name,
-									From:      c.image,
-									To:        want,
-									Result:    "paused",
-								})
-							case dryRun:
-								local = append(local, state.Result{
-									Cluster:   cl.Name,
-									Namespace: ns,
-									Kind:      wk.Kind,
-									Name:      wname,
-									Container: c.name,
-									From:      c.image,
-									To:        want,
-									Result:    "would-deploy",
-								})
-							default:
-								toPatch = append(toPatch, c)
-							}
-						}
-
-						if len(toPatch) == 0 {
-							continue
-						}
-						patchOps := buildImageJSONPatch(wk.PodSpecPtr, toPatch, want, hasAnnMap, strings.TrimSpace(want+" "+source))
-						err := cl.Patch(ctx, wk.itemPath(ns, wname)+"?fieldManager=ferry", "application/json-patch+json", patchOps, nil)
-						for _, c := range toPatch {
-							res := state.Result{
+						switch {
+						case c.image == want:
+							local = append(local, state.Result{
 								Cluster:   cl.Name,
 								Namespace: ns,
 								Kind:      wk.Kind,
@@ -446,15 +404,68 @@ func (e *Engine) Deploy(ctx context.Context, actor, image, tag, source string, d
 								Container: c.name,
 								From:      c.image,
 								To:        want,
-							}
-							if err != nil {
-								res.Result = "error"
-								res.Error = err.Error()
-							} else {
-								res.Result = "deployed"
-							}
-							local = append(local, res)
+								Result:    "current",
+							})
+						case isArgo:
+							local = append(local, state.Result{
+								Cluster:   cl.Name,
+								Namespace: ns,
+								Kind:      wk.Kind,
+								Name:      wname,
+								Container: c.name,
+								From:      c.image,
+								To:        want,
+								Result:    "argo-cd",
+							})
+						case isPaused:
+							local = append(local, state.Result{
+								Cluster:   cl.Name,
+								Namespace: ns,
+								Kind:      wk.Kind,
+								Name:      wname,
+								Container: c.name,
+								From:      c.image,
+								To:        want,
+								Result:    "paused",
+							})
+						case dryRun:
+							local = append(local, state.Result{
+								Cluster:   cl.Name,
+								Namespace: ns,
+								Kind:      wk.Kind,
+								Name:      wname,
+								Container: c.name,
+								From:      c.image,
+								To:        want,
+								Result:    "would-deploy",
+							})
+						default:
+							toPatch = append(toPatch, c)
 						}
+					}
+
+					if len(toPatch) == 0 {
+						continue
+					}
+					patchOps := buildImageJSONPatch(wk.PodSpecPtr, toPatch, want, hasAnnMap, strings.TrimSpace(want+" "+source))
+					err := e.clusterError(cctx, ctx, cl, cl.Patch(cctx, wk.itemPath(ns, wname)+"?fieldManager=ferry", "application/json-patch+json", patchOps, nil))
+					for _, c := range toPatch {
+						res := state.Result{
+							Cluster:   cl.Name,
+							Namespace: ns,
+							Kind:      wk.Kind,
+							Name:      wname,
+							Container: c.name,
+							From:      c.image,
+							To:        want,
+						}
+						if err != nil {
+							res.Result = "error"
+							res.Error = err.Error()
+						} else {
+							res.Result = "deployed"
+						}
+						local = append(local, res)
 					}
 				}
 			}

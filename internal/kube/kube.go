@@ -35,6 +35,13 @@ type Config struct {
 
 const saDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 
+// Connection limits for every cluster client. Variables so tests can shorten them.
+var (
+	DialTimeout         = 5 * time.Second
+	TLSHandshakeTimeout = 5 * time.Second
+	RequestTimeout      = 30 * time.Second
+)
+
 type Client struct {
 	Name      string
 	server    string
@@ -89,10 +96,15 @@ func New(c Config) (*Client, error) {
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = tlsConf
+	// An API server that is gone (node cancelled, port blackholed) must fail in seconds, not hold
+	// every request for the full client timeout: callers fan out over all clusters and one dead
+	// cluster would otherwise set the pace for the rest.
+	tr.DialContext = (&net.Dialer{Timeout: DialTimeout, KeepAlive: 30 * time.Second}).DialContext
+	tr.TLSHandshakeTimeout = TLSHandshakeTimeout
 	return &Client{
 		Name:      c.Name,
 		server:    strings.TrimRight(c.Server, "/"),
-		hc:        &http.Client{Transport: tr, Timeout: 30 * time.Second},
+		hc:        &http.Client{Transport: tr, Timeout: RequestTimeout},
 		token:     c.Token,
 		tokenFile: c.TokenFile,
 	}, nil

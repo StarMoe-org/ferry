@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +19,10 @@ import (
 
 const dnsSyncEvery = 30 * time.Second
 
+// dnsClusterTimeout is each cluster's share of a sync pass, which as a whole has dnsSyncEvery: a
+// cluster that hangs must leave time for the record writes that the healthy clusters need.
+const dnsClusterTimeout = 10 * time.Second
+
 // dnsSyncer gives every Ingress host under dns.zone an A record at the public address of the cluster
 // it runs in, and removes the record when the host is gone from every cluster. With dns.cdn on, hosts
 // go behind the CDN pool instead (see cdnpool.go). People add domains in the dashboard; nothing there
@@ -26,6 +31,8 @@ type dnsSyncer struct {
 	eng   *Engine
 	gcore *gcoreDNS
 	cdn   *cdnPool // nil: plain A records
+
+	clusterTimeout time.Duration // per-cluster read limit; 0 means dnsClusterTimeout
 
 	ctx  context.Context
 	stop context.CancelFunc
@@ -161,30 +168,54 @@ func removable(name, zone string, ips, ours []string) bool {
 }
 
 // ingressHosts maps each host under the zone to the clusters serving it. complete is false when a
-// cluster could not be read.
+// cluster could not be read. Clusters are read at once, each on its own clock, so one that hangs
+// costs the pass at most clusterTimeout and the healthy ones still get their records.
 func (d *dnsSyncer) ingressHosts(ctx context.Context, problems map[string]string) (map[string][]string, bool) {
 	suffix := "." + d.eng.cfg.DNS.Zone
+	type ingressList struct {
+		Items []struct {
+			Metadata struct {
+				DeletionTimestamp string `json:"deletionTimestamp"`
+			} `json:"metadata"`
+			Spec struct {
+				Rules []struct {
+					Host string `json:"host"`
+				} `json:"rules"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	timeout := d.clusterTimeout
+	if timeout <= 0 {
+		timeout = dnsClusterTimeout
+	}
+	lists := make([]ingressList, len(d.eng.clusters))
+	errs := make([]error, len(d.eng.clusters))
+	var wg sync.WaitGroup
+	for i, cl := range d.eng.clusters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			if err := cl.Get(cctx, "/apis/networking.k8s.io/v1/ingresses", &lists[i]); err != nil {
+				if errors.Is(cctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+					err = fmt.Errorf("no answer within %s: %w", timeout, err)
+				}
+				errs[i] = err
+			}
+		}()
+	}
+	wg.Wait()
+
 	want := map[string][]string{}
 	complete := true
-	for _, cl := range d.eng.clusters {
-		var list struct {
-			Items []struct {
-				Metadata struct {
-					DeletionTimestamp string `json:"deletionTimestamp"`
-				} `json:"metadata"`
-				Spec struct {
-					Rules []struct {
-						Host string `json:"host"`
-					} `json:"rules"`
-				} `json:"spec"`
-			} `json:"items"`
-		}
-		if err := cl.Get(ctx, "/apis/networking.k8s.io/v1/ingresses", &list); err != nil {
-			problems["cluster/"+cl.Name] = fmt.Sprintf("list ingresses on %s: %v", cl.Name, err)
+	for i, cl := range d.eng.clusters {
+		if errs[i] != nil {
+			problems["cluster/"+cl.Name] = fmt.Sprintf("list ingresses on %s: %v", cl.Name, errs[i])
 			complete = false
 			continue
 		}
-		for _, ing := range list.Items {
+		for _, ing := range lists[i].Items {
 			if ing.Metadata.DeletionTimestamp != "" {
 				continue
 			}

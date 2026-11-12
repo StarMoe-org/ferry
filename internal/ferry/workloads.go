@@ -78,43 +78,43 @@ func (e *Engine) Workloads(ctx context.Context, fresh bool) (Inventory, error) {
 		wg.Add(1)
 		go func(ci int, cl *kube.Client) {
 			defer wg.Done()
+			cctx, cancel := e.clusterContext(ctx)
+			defer cancel()
 			cs := ClusterSummary{
 				Name:   cl.Name,
 				Server: cl.ServerHost(),
 			}
-			ver, err := cl.Version(ctx)
+			ver, err := cl.Version(cctx)
 			if err != nil {
 				cs.Reachable = false
-				cs.Error = err.Error()
+				cs.Error = e.clusterError(cctx, ctx, cl, err).Error()
 				summaries[ci] = cs
 				return
 			}
 			cs.Reachable = true
 			cs.Version = ver
 
+			targets, paths := workloadTargets(e.cfg.Namespaces)
+			lists := listAll(cctx, cl, paths)
+
 			var items []WorkloadItem
 			var firstListErr string
-			for _, ns := range e.cfg.Namespaces {
-				for _, wk := range workloadKinds {
-					var listResp struct {
-						Items []map[string]any `json:"items"`
+			for ti, t := range targets {
+				if err := lists[ti].err; err != nil {
+					if firstListErr == "" {
+						firstListErr = e.clusterError(cctx, ctx, cl, err).Error()
 					}
-					if err := cl.Get(ctx, wk.listPath(ns), &listResp); err != nil {
-						if firstListErr == "" {
-							firstListErr = err.Error()
-						}
+					continue
+				}
+				for _, raw := range lists[ti].items {
+					wi, ok := parseWorkloadItem(cl.Name, t.ns, t.wk, raw, autoKey)
+					if !ok {
 						continue
 					}
-					for _, raw := range listResp.Items {
-						wi, ok := parseWorkloadItem(cl.Name, ns, wk, raw, autoKey)
-						if !ok {
-							continue
-						}
-						items = append(items, wi)
-						cs.WorkloadCount++
-						if !wi.Healthy {
-							cs.NotReadyCount++
-						}
+					items = append(items, wi)
+					cs.WorkloadCount++
+					if !wi.Healthy {
+						cs.NotReadyCount++
 					}
 				}
 			}

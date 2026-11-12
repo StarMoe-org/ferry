@@ -37,6 +37,9 @@ type WebhookStatus struct {
 type SnapshotResult struct {
 	Status string `json:"status"` // "committed" | "unchanged" | "queued"
 	Commit string `json:"commit,omitempty"`
+	// Failed names the clusters left out of this snapshot, each with its error. Their directories
+	// keep the previous snapshot.
+	Failed []string `json:"failed,omitempty"`
 }
 
 type snapshotKindSpec struct {
@@ -222,12 +225,17 @@ func (e *Engine) runSnapshotOnce(ctx context.Context, actor string) (SnapshotRes
 		return SnapshotResult{}, errors.New(msg)
 	}
 
+	status, msg := "ok", res.Status
+	if len(res.Failed) > 0 {
+		status = "partial"
+		msg = fmt.Sprintf("%s without %s", res.Status, strings.Join(res.Failed, "; "))
+	}
 	_, _ = e.store.AppendEvent(context.Background(), state.Event{
 		Kind:    "snapshot",
 		Actor:   actor,
 		Commit:  res.Commit,
-		Status:  "ok",
-		Message: res.Status,
+		Status:  status,
+		Message: msg,
 	})
 	return res, nil
 }
@@ -277,7 +285,16 @@ func (e *Engine) executeSnapshot(ctx context.Context) (SnapshotResult, error) {
 
 	stateCluster, _ := e.cfg.ResolveStateCluster()
 
-	for _, cl := range e.clusters {
+	// Read every cluster first, all at once and each on its own clock. Only a cluster that was read in
+	// full has its directory rewritten: one that is down keeps its last good snapshot in the repo, and
+	// the others are committed without it.
+	fetched := e.fetchSnapshotClusters(ctx)
+	var failed []string
+	for ci, cl := range e.clusters {
+		if fetched[ci].err != nil {
+			failed = append(failed, fmt.Sprintf("%s (%s)", cl.Name, e.scrubSecrets(fetched[ci].err.Error())))
+			continue
+		}
 		cdir := filepath.Join(snapRoot, cl.Name)
 		if err := os.MkdirAll(cdir, 0o755); err != nil {
 			return SnapshotResult{}, err
@@ -286,30 +303,19 @@ func (e *Engine) executeSnapshot(ctx context.Context) (SnapshotResult, error) {
 		_ = os.Remove(filepath.Join(cdir, "secrets.enc.yaml"))
 		_ = os.Remove(filepath.Join(cdir, "secrets.sha256"))
 
-		for _, ns := range e.cfg.Namespaces {
+		for ni, ns := range e.cfg.Namespaces {
 			var pubDocs []string
 			var secDocs []string
 
-			for _, sk := range snapshotKinds {
-				listPath := sk.APIPrefix + "/namespaces/" + ns + "/" + sk.Plural
-				var listResp struct {
-					Items []map[string]any `json:"items"`
-				}
-				if err := cl.Get(ctx, listPath, &listResp); err != nil {
-					if kube.IsNotFound(err) {
-						// Optional CRD (e.g. Traefik Middleware) not installed on this cluster.
-						continue
-					}
-					return SnapshotResult{}, fmt.Errorf("cluster %s %s/%s: %w", cl.Name, ns, sk.Plural, err)
-				}
-
-				sort.Slice(listResp.Items, func(i, j int) bool {
-					ni, _ := nestedName(listResp.Items[i])
-					nj, _ := nestedName(listResp.Items[j])
-					return ni < nj
+			for ki, sk := range snapshotKinds {
+				items := fetched[ci].lists[ni*len(snapshotKinds)+ki]
+				sort.Slice(items, func(i, j int) bool {
+					a, _ := nestedName(items[i])
+					b, _ := nestedName(items[j])
+					return a < b
 				})
 
-				for _, rawItem := range listResp.Items {
+				for _, rawItem := range items {
 					if e.isOwnStateConfigMap(cl.Name, stateCluster, ns, sk.Kind, rawItem) {
 						continue
 					}
@@ -368,6 +374,9 @@ func (e *Engine) executeSnapshot(ctx context.Context) (SnapshotResult, error) {
 			}
 		}
 	}
+	if len(e.clusters) > 0 && len(failed) == len(e.clusters) {
+		return SnapshotResult{}, fmt.Errorf("no cluster could be read: %s", strings.Join(failed, "; "))
+	}
 
 	// Write <dir>/ferry.json containing sources only (never tokens!).
 	ferryJSON, err := e.store.SourcesSnapshotJSON()
@@ -387,7 +396,7 @@ func (e *Engine) executeSnapshot(ctx context.Context) (SnapshotResult, error) {
 	diffErr := diffCmd.Run()
 	if diffErr == nil {
 		head := currentHeadOrEmpty(ctx, work)
-		return SnapshotResult{Status: "unchanged", Commit: head}, nil
+		return SnapshotResult{Status: "unchanged", Commit: head, Failed: failed}, nil
 	}
 	var exitErr *exec.ExitError
 	if !errors.As(diffErr, &exitErr) || exitErr.ExitCode() != 1 {
@@ -407,7 +416,60 @@ func (e *Engine) executeSnapshot(ctx context.Context) (SnapshotResult, error) {
 		return SnapshotResult{}, fmt.Errorf("git push snapshot: %w", err)
 	}
 
-	return SnapshotResult{Status: "committed", Commit: commitSHA}, nil
+	return SnapshotResult{Status: "committed", Commit: commitSHA, Failed: failed}, nil
+}
+
+// snapshotClusterTimeout is each cluster's limit for reading everything a snapshot needs from it.
+const snapshotClusterTimeout = 2 * time.Minute
+
+type snapshotFetch struct {
+	lists [][]map[string]any // namespace-major, then snapshotKinds order
+	err   error
+}
+
+// fetchSnapshotClusters reads every namespace and kind from every cluster at once. A cluster's read
+// fails as a whole on its first error (bar a 404 from an optional CRD), so a half-read cluster is
+// never written over its previous snapshot.
+func (e *Engine) fetchSnapshotClusters(ctx context.Context) []snapshotFetch {
+	timeout := e.snapshotClusterTimeout
+	if timeout <= 0 {
+		timeout = snapshotClusterTimeout
+	}
+	var paths []string
+	for _, ns := range e.cfg.Namespaces {
+		for _, sk := range snapshotKinds {
+			paths = append(paths, sk.APIPrefix+"/namespaces/"+ns+"/"+sk.Plural)
+		}
+	}
+	out := make([]snapshotFetch, len(e.clusters))
+	var wg sync.WaitGroup
+	for ci, cl := range e.clusters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			res := listAll(cctx, cl, paths)
+			lists := make([][]map[string]any, len(paths))
+			for i, r := range res {
+				if r.err != nil {
+					if kube.IsNotFound(r.err) {
+						// Optional CRD (e.g. Traefik Middleware) not installed on this cluster.
+						continue
+					}
+					if errors.Is(cctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+						r.err = fmt.Errorf("no answer within %s: %w", timeout, r.err)
+					}
+					out[ci].err = fmt.Errorf("%s: %w", strings.TrimPrefix(paths[i], "/"), r.err)
+					return
+				}
+				lists[i] = r.items
+			}
+			out[ci].lists = lists
+		}()
+	}
+	wg.Wait()
+	return out
 }
 
 func (e *Engine) isOwnStateConfigMap(cluster, stateCluster, ns, kind string, item map[string]any) bool {

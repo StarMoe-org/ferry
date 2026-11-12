@@ -273,13 +273,25 @@ func (s *Server) handleDeployPreview(w http.ResponseWriter, r *http.Request, act
 	writeJSON(w, http.StatusOK, results)
 }
 
+// writeDeployResults answers 500 when the deploy failed: a workload running the image could not be
+// changed, or a cluster could not be read and nothing anywhere was found running the image. A cluster
+// that is down while the image was handled elsewhere still answers 200 (its errors are in the body
+// and the event is partial), so one dead edge cluster doesn't fail every repository's CI.
 func writeDeployResults(w http.ResponseWriter, results []state.Result) {
 	code := http.StatusOK
+	var workloadErr, clusterErr, handled bool
 	for _, r := range results {
-		if r.Result == "error" {
-			code = http.StatusInternalServerError
-			break
+		switch {
+		case r.Result == "error" && r.Name != "":
+			workloadErr = true
+		case r.Result == "error":
+			clusterErr = true // listing failed: Cluster, Namespace and Kind only
+		default:
+			handled = true
 		}
+	}
+	if workloadErr || (clusterErr && !handled) {
+		code = http.StatusInternalServerError
 	}
 	writeJSON(w, code, results)
 }

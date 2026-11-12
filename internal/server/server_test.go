@@ -520,3 +520,23 @@ func TestOIDC_ES256_Groups_CSRF_CIAuth_LegacyDeploy_Rollout_And_AsyncSnapshot(t 
 		t.Fatalf("background POST /snapshot event = %+v, want ok/committed", snapDone)
 	}
 }
+
+func TestDeployStatusWithAClusterDown(t *testing.T) {
+	down := state.Result{Cluster: "tl", Namespace: "apps", Kind: "Deployment", Result: "error", Error: "cluster tl did not answer within 20s"}
+	for name, tc := range map[string]struct {
+		results []state.Result
+		want    int
+	}{
+		"deployed elsewhere": {[]state.Result{down, {Cluster: "jp1", Name: "notes", Result: "deployed"}}, http.StatusOK},
+		"current elsewhere":  {[]state.Result{down, {Cluster: "jp1", Name: "notes", Result: "current"}}, http.StatusOK},
+		"found nowhere":      {[]state.Result{down}, http.StatusInternalServerError},
+		"patch failed":       {[]state.Result{{Cluster: "jp1", Name: "notes", Result: "error", Error: "403"}, {Cluster: "sg", Name: "notes", Result: "deployed"}}, http.StatusInternalServerError},
+		"nothing runs it":    {[]state.Result{}, http.StatusOK},
+	} {
+		rec := httptest.NewRecorder()
+		writeDeployResults(rec, tc.results)
+		if rec.Code != tc.want {
+			t.Errorf("%s: got %d, want %d", name, rec.Code, tc.want)
+		}
+	}
+}

@@ -206,14 +206,29 @@ and whose tag equals the first 12 characters of the build's commit, set that bui
 
 ## Behaviour
 
+### One cluster down never holds up the others
+
+Edge clusters come and go (a node is cancelled, its API port stops answering). Anything that goes
+over every cluster treats each one on its own:
+
+- Cluster clients give up on a TCP connect after 5 s and on a TLS handshake after 5 s, and on any
+  single request after 30 s.
+- Deploy and the workload inventory run all clusters at once, list every namespace and kind of a
+  cluster at once, and give each cluster 20 s in all. A cluster that runs out reports
+  `cluster <name> did not answer within 20s` and the rest answer as usual, so `/deploy` stays well
+  under the 100 s Cloudflare and 120 s `hack/bump.sh` limits.
+- DNS sync reads all clusters at once, 10 s each, inside its 30 s pass (see DNS).
+- A snapshot reads all clusters at once, 2 minutes each, and leaves out a cluster it could not read
+  in full (see Snapshots).
+
 ### Deploy (CI → Ferry)
 
 `Deploy(image, tag, source, dryRun)`:
 
 - Image matching and patching:
   - `want = image + ":" + tag`.
-  - Do every cluster in parallel. Within a cluster, go through every configured namespace and
-    every kind (Deployment, StatefulSet, DaemonSet, CronJob), and list the objects.
+  - Do every cluster in parallel, each with its own 20 s deadline. Within a cluster, list every
+    configured namespace and every kind (Deployment, StatefulSet, DaemonSet, CronJob) at once.
   - A container "runs" the image when its `image` is exactly `image`, or starts with `image + ":"`
     or `image + "@"`. Check both `initContainers` and `containers`.
   - Pod spec path: `/spec/template/spec`, or for CronJob `/spec/jobTemplate/spec/template/spec`.
@@ -330,7 +345,11 @@ Sources with `builder: external` ignore webhooks. The UI shows the CI snippet fo
 Port `snapshot()` from `docs/reference/relay.py`. Every day at `hourUTC`, and on demand:
 
 - Shallow-clone the repo with auth by header, not by a token in the URL.
-- For each cluster and namespace, write:
+- Read every cluster first, all at once, each within 2 minutes. A cluster whose read fails (any
+  error but a 404 for an optional CRD, or the time limit) is left out: its directory keeps the last
+  snapshot, and the other clusters are still committed and pushed. If no cluster could be read, the
+  snapshot fails.
+- For each cluster that was read and each namespace, write:
   - `<dir>/<cluster>/<namespace>.yaml`: everything except Secrets;
   - `<dir>/<cluster>/<namespace>.secrets.enc.yaml`: the Secrets, then run `sops -e -i` on it;
   - `<dir>/<cluster>/<namespace>.secrets.sha256`: a digest of the plaintext, so unchanged Secrets
@@ -344,7 +363,8 @@ Port `snapshot()` from `docs/reference/relay.py`. Every day at `hourUTC`, and on
 - Also write `<dir>/ferry.json` with the sources. Never write the tokens.
 - Commit only if `git diff --cached` shows changes, with message
   `snapshot: <namespaces joined by ", ">`, then push. Event kind `snapshot`, status `ok`, with
-  Message `committed` or `unchanged`.
+  Message `committed` or `unchanged`. With clusters left out the status is `partial` and the Message
+  names them, for example `committed without tl (apis/apps/v1/...: no answer within 2m0s: ...)`.
 - One snapshot at a time. An extra request while one is running joins it.
 
 ### DNS
@@ -354,8 +374,9 @@ Ingresses in every namespace of every cluster and gives each host under the zone
 `dns.targets[<cluster>]`, so adding a domain in the dashboard is all it takes. A host gone from every
 cluster loses its record.
 
-- Deletes need a full view: if any cluster can't be read, the pass adds and moves records but deletes
-  nothing.
+- Clusters are read at once, each within 10 s, so a cluster that hangs can't use up the pass.
+- Deletes need a full view: if any cluster can't be read, the pass adds and moves records for the
+  others but deletes nothing.
 - Only A records pointing at `dns.targets` are deleted. The zone's own records, wildcards and records
   pointing elsewhere are treated as hand-made and left alone.
 - A host on two clusters is reported and its record left as it is.

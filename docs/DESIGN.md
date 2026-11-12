@@ -437,7 +437,7 @@ gets `no-cache`.
 | `GET /healthz` | none | `ok` |
 | `POST /` , `POST /webhook/github` | HMAC | GitHub webhook |
 | `POST /deploy` | CI | legacy; same as below |
-| `POST /api/deploy` | CI or session | `{image, tag, source}` → 200 JSON array of Results, or 500 if any error |
+| `POST /api/deploy` | CI or session | `{image, tag, source}` → 200 JSON array of Results, or 500 if a workload failed, or a cluster was unreadable and the image found nowhere |
 | `POST /api/deploy/preview` | session | `{image, tag}` → dry-run Results |
 | `POST /snapshot`, `POST /api/snapshot` | CI or session | 202 |
 | `GET /auth/login` `GET /auth/callback` `POST /auth/logout` | – | OIDC |
@@ -498,7 +498,10 @@ These are already in use and must keep working unchanged:
    - Request: Bearer CNB token (gitRead) and JSON `{"image","tag","source"}`.
    - Success: 200, and the body is printed by CI.
    - Errors: 400 text `expected {"image", "tag", "source"}` / `bad image or tag`, 401 text, and
-     500 when any Result failed. bump.sh retries 3 times on anything but 200.
+     500 when a workload failed, or a cluster could not be read and the image was found on no
+     other cluster. A cluster that is down while the others handled the image is not a failure
+     here: its errors are in the body and the event is `partial`. bump.sh retries 3 times on
+     anything but 200.
    - `source` is truncated to 300 characters.
 2. **`POST /`**: GitHub webhooks of about 10 private repositories already point at
    `https://ci.star.moe/` with the existing secret.

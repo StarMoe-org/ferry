@@ -122,7 +122,7 @@ curl -fsS -X POST "https://ferry.example.com/deploy" \
       -d "{\"image\":\"ghcr.io/org/service\",\"tag\":\"${TAG}\",\"source\":\"github:${{ github.repository }}@${TAG}\"}"
 ```
 
-`POST /deploy` returns HTTP `200` with the JSON array of per-workload results, or HTTP `500` (still returning the JSON results array) if any workload failed to patch.
+`POST /deploy` returns HTTP `200` with the JSON array of per-workload results, or HTTP `500` (still returning the JSON results array) if any workload failed to patch, or if a cluster could not be read and the image was found nowhere else. A cluster that is down while the image was handled on the others still gives `200`, with its errors in the array.
 
 ---
 
